@@ -100,7 +100,9 @@ def train(args: argparse.Namespace) -> None:
         max_seq_length=args.max_seq_length,
         load_in_4bit=True,
     )
-    if tokenizer.pad_token is None:
+    if tokenizer.eos_token not in tokenizer.get_vocab():
+        tokenizer.eos_token = tokenizer.sep_token or tokenizer.eos_token or "<|endoftext|>"
+    if tokenizer.pad_token is None or tokenizer.pad_token not in tokenizer.get_vocab():
         tokenizer.pad_token = tokenizer.eos_token
     model = FastLanguageModel.get_peft_model(
         model,
@@ -125,6 +127,7 @@ def train(args: argparse.Namespace) -> None:
     training_args = SFTConfig(
         output_dir=str(args.output_dir),
         dataset_text_field="text",
+        eos_token=tokenizer.eos_token,
         max_length=args.max_seq_length,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
