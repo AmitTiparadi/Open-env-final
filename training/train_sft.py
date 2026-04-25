@@ -158,6 +158,8 @@ def train(args: argparse.Namespace) -> None:
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         max_steps=args.max_steps,
+        fp16=args.fp16,
+        bf16=args.bf16,
         logging_steps=1,
         eval_strategy="steps",
         eval_steps=max(1, args.max_steps // 5),
@@ -204,6 +206,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-to", default=os.getenv("REPORT_TO", "none"))
     parser.add_argument("--run-name", default="incident-commander-sft")
     parser.add_argument("--seed", type=int, default=43)
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--bf16", action="store_true")
     return parser
 
 
