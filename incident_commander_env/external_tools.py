@@ -52,6 +52,13 @@ FORBIDDEN_MODULE_NAMES = {
 }
 
 
+def _merged_metrics(scenario: IncidentScenario) -> dict[str, dict[str, tuple[float, ...]]]:
+    merged = {service: dict(metrics) for service, metrics in scenario.metrics.items()}
+    for service, metrics in scenario.red_herring_metrics.items():
+        merged.setdefault(service, {}).update(metrics)
+    return merged
+
+
 def _safe_builtins() -> dict[str, Any]:
     return {
         "abs": abs,
@@ -162,6 +169,9 @@ def _scenario_corpus(scenario: IncidentScenario) -> list[dict[str, str]]:
     for service, lines in scenario.logs.items():
         for line in lines:
             rows.append({"source": f"logs:{service}", "text": line})
+    for service, lines in scenario.red_herring_logs.items():
+        for line in lines:
+            rows.append({"source": f"logs:{service}:red_herring", "text": line})
     for service, metrics in scenario.metrics.items():
         for metric, values in metrics.items():
             if values:
@@ -171,6 +181,17 @@ def _scenario_corpus(scenario: IncidentScenario) -> list[dict[str, str]]:
                         "text": f"{metric} moved from {values[0]} to {values[-1]}",
                     }
                 )
+    for service, metrics in scenario.red_herring_metrics.items():
+        for metric, values in metrics.items():
+            if values:
+                rows.append(
+                    {
+                        "source": f"metrics:{service}:red_herring",
+                        "text": f"{metric} moved from {values[0]} to {values[-1]}",
+                    }
+                )
+    for index, link in enumerate(scenario.causal_chain, 1):
+        rows.append({"source": f"causal_chain:{index}", "text": link})
     rows.append({"source": "impact", "text": scenario.stakeholder_impact})
     for red_herring in scenario.red_herrings:
         rows.append({"source": "red_herring", "text": red_herring})
@@ -215,17 +236,23 @@ def query_incident_api(scenario: IncidentScenario, endpoint: str) -> dict[str, A
 
     endpoint_name = normalize_text(endpoint).replace(" ", "_")
     if endpoint_name in {"service_graph", "dependencies", "service_dependencies"}:
-        services = sorted(set(scenario.logs) | set(scenario.metrics))
+        services = sorted(
+            set(scenario.logs)
+            | set(scenario.metrics)
+            | set(scenario.red_herring_logs)
+            | set(scenario.red_herring_metrics)
+        )
         return {
             "endpoint": "service_graph",
             "affected_service": scenario.affected_service,
+            "origin_service_candidate": scenario.origin_service or scenario.affected_service,
             "observed_services": services,
             "possible_downstream_symptoms": list(scenario.red_herrings),
         }
     if endpoint_name in {"deployments", "config_changes", "changes"}:
         change_lines = [
             line
-            for lines in scenario.logs.values()
+            for lines in [*scenario.logs.values(), *scenario.red_herring_logs.values()]
             for line in lines
             if any(term in line.lower() for term in ("deploy", "config", "canary", "rollback"))
         ]
@@ -239,7 +266,7 @@ def query_incident_api(scenario: IncidentScenario, endpoint: str) -> dict[str, A
                     for name, values in metrics.items()
                     if values
                 }
-                for service, metrics in scenario.metrics.items()
+                for service, metrics in _merged_metrics(scenario).items()
             },
         }
     if endpoint_name in {"runbook", "remediation_runbook"}:

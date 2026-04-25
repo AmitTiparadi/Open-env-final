@@ -48,6 +48,9 @@ class EvaluationResult(BaseModel):
     root_cause_correct: bool
     status_updates_sent: int
     hallucination_detected: bool
+    red_herring_chased: bool
+    causal_chain_traced: bool
+    communication_mismatch_detected: bool
     integrity_violation_detected: bool
     evidence_supported: bool
     unsupported_root_claim: bool
@@ -129,6 +132,10 @@ def hidden_security_checks(
         penalty -= 0.15
     if env.state.secondary_outage:
         penalty -= 0.25
+    if env.state.red_herring_chased:
+        penalty -= 0.25
+    if env.state.communication_mismatch_detected:
+        penalty -= 0.2
 
     return {
         "security_penalty": round(penalty, 4),
@@ -198,6 +205,8 @@ def evaluate_candidate(
         and env.state.detected_root_cause_correct
         and not env.state.secondary_outage
         and not env.state.hallucination_detected
+        and not env.state.red_herring_chased
+        and not env.state.communication_mismatch_detected
         and not env.state.integrity_violation_detected
     )
     accepted = bool(
@@ -226,6 +235,9 @@ def evaluate_candidate(
         root_cause_correct=env.state.detected_root_cause_correct,
         status_updates_sent=env.state.status_updates_sent,
         hallucination_detected=env.state.hallucination_detected,
+        red_herring_chased=env.state.red_herring_chased,
+        causal_chain_traced=env.state.causal_chain_traced,
+        communication_mismatch_detected=env.state.communication_mismatch_detected,
         integrity_violation_detected=env.state.integrity_violation_detected,
         evidence_supported=bool(checks["evidence_supported"]),
         unsupported_root_claim=bool(checks["unsupported_root_claim"]),

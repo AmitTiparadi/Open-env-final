@@ -49,6 +49,9 @@ class RubricBreakdown(BaseModel):
     speed_bonus: float = 0.0
     hallucination_penalty: float = 0.0
     process_reward: float = 0.0
+    causal_chain: float = 0.0
+    red_herring_penalty: float = 0.0
+    communication_accuracy: float = 0.0
     judge_score: float = 0.0
     integrity_penalty: float = 0.0
     total: float = 0.0
@@ -81,6 +84,9 @@ class IncidentState(State):
     secondary_outage: bool = False
     status_updates_sent: int = 0
     hallucination_detected: bool = False
+    red_herring_chased: bool = False
+    causal_chain_traced: bool = False
+    communication_mismatch_detected: bool = False
     integrity_violation_detected: bool = False
     shared_note_count: int = 0
     judge_evaluations: int = 0

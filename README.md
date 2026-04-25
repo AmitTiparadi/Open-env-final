@@ -99,6 +99,16 @@ to `-5.0` so one bad rollout does not dominate the batch variance. Evaluation,
 hidden tests, the judge tool, and reward-hack reports still use the full
 `-100.0` hard-fail score.
 
+The simulator also injects harder incident dynamics:
+
+- red-herring logs and metrics that point to plausible but wrong causes
+- cascading failure chains where downstream symptoms differ from the origin
+- communicator accuracy checks against what the team actually established
+
+Agents get extra credit for tracing the causal origin and are penalized for
+chasing planted false clues or sending confident stakeholder updates that do
+not match the evidence.
+
 The judge is deliberately not the only source of truth. It scores root cause,
 fix safety, stakeholder update, evidence process, and sequence completeness as
 separate parts, so one mistake does not erase all useful work. Reward-hacking
@@ -312,6 +322,28 @@ normal `scenario_ids()` metadata, or the generated dataset files. They are only
 available when evaluator code explicitly opts in, and hidden environment
 observations replace the real case id with `hidden_eval_case`.
 
+## Incident Complexity CSV
+
+Run:
+
+```bash
+python scripts/incident_complexity_report.py
+```
+
+For public and hidden cases together:
+
+```bash
+python scripts/incident_complexity_report.py --include-hidden
+```
+
+This writes clean screenshot-friendly CSV files to `outputs/evals/`, including:
+
+- `outputs/evals/incident_complexity_report_public.csv`
+- `outputs/evals/incident_complexity_report_public_hidden.csv`
+
+Useful columns include `red_herring_chased`, `causal_chain_traced`,
+`communication_mismatch`, `final_score`, `accepted`, and `success`.
+
 ## Training On Hugging Face GPU Space
 
 This project includes a minimal GRPO training scaffold:
@@ -479,6 +511,7 @@ scripts/
   run_demo.py
   evaluate_baseline.py
   reward_hack_tester.py
+  incident_complexity_report.py
   interactive_rl_smoke.py
 tests/
   test_environment.py
@@ -502,6 +535,8 @@ Implemented:
 - sandboxed Python, local search, and structured API tools
 - action-observation interactive rollout runner
 - adaptive curriculum task generator
+- red-herring injection and cascading failure chains
+- communicator factual-accuracy penalties
 - scripted baseline
 - random baseline evaluation
 - reward-hack stress test using the same hidden evaluator

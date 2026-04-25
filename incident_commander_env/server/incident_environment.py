@@ -27,7 +27,10 @@ from incident_commander_env.models import (
 from incident_commander_env.rewards import (
     EVALUATION_INTEGRITY_PENALTY,
     best_evidence_overlap,
+    causal_chain_score,
+    communication_consistency_penalty,
     contains_real_evidence,
+    detects_red_herring_chase,
     detects_false_root_cause,
     matches_root_cause,
     score_status_update,
@@ -122,6 +125,9 @@ class IncidentCommanderEnvironment(
             secondary_outage=False,
             status_updates_sent=0,
             hallucination_detected=False,
+            red_herring_chased=False,
+            causal_chain_traced=False,
+            communication_mismatch_detected=False,
             integrity_violation_detected=False,
             shared_note_count=0,
             judge_evaluations=0,
@@ -359,16 +365,25 @@ class IncidentCommanderEnvironment(
         self.shared_notes.append(f"{action.agent_role.value}: {note}")
         self._state.shared_note_count = len(self.shared_notes)
         hallucinated = detects_false_root_cause(note, self.scenario)
+        red_herring = detects_red_herring_chase(note, self.scenario)
         if hallucinated:
             self._state.hallucination_detected = True
+        if red_herring:
+            self._state.red_herring_chased = True
         reward = 0.02 if contains_real_evidence(note, self.scenario) else 0.005
         if hallucinated:
             reward -= 0.08
+        if red_herring:
+            reward -= 0.04
         return self._observation(
             message="Shared note added.",
             reward=reward,
             role=action.agent_role,
-            tool_result={"accepted": True, "hallucinated": hallucinated},
+            tool_result={
+                "accepted": True,
+                "hallucinated": hallucinated,
+                "red_herring_chased": red_herring,
+            },
         )
 
     def _tool_submit_root_cause(self, action: IncidentAction) -> IncidentObservation:
@@ -376,17 +391,24 @@ class IncidentCommanderEnvironment(
         evidence = str(action.arguments.get("evidence") or "")
         correct = matches_root_cause(f"{root_cause} {evidence}", self.scenario)
         hallucinated = detects_false_root_cause(f"{root_cause} {evidence}", self.scenario)
+        red_herring = detects_red_herring_chase(f"{root_cause} {evidence}", self.scenario)
+        chain_score = causal_chain_score(f"{root_cause} {evidence}", self.scenario)
         self._state.detected_root_cause = root_cause or None
         self._state.detected_root_cause_correct = correct
+        self._state.causal_chain_traced = chain_score >= 0.04
         if hallucinated:
             self._state.hallucination_detected = True
+        if red_herring:
+            self._state.red_herring_chased = True
         if correct:
-            reward = 0.4
+            reward = 0.4 + chain_score
             message = "Correct root cause submitted."
         else:
             reward = -0.3
             message = "Root cause submission is not supported by the incident evidence."
         if hallucinated:
+            reward -= 0.1
+        if red_herring:
             reward -= 0.1
         return self._observation(
             message=message,
@@ -396,6 +418,8 @@ class IncidentCommanderEnvironment(
                 "correct": correct,
                 "canonical_root_cause": self.scenario.root_cause if correct else None,
                 "hallucinated": hallucinated,
+                "red_herring_chased": red_herring,
+                "causal_chain_score": chain_score,
             },
         )
 
@@ -432,19 +456,31 @@ class IncidentCommanderEnvironment(
             root_cause_correct=self._state.detected_root_cause_correct,
             resolved=self._state.resolved,
         )
+        consistency_penalty, mismatch, consistency_reasons = communication_consistency_penalty(
+            message=message,
+            scenario=self.scenario,
+            established_text=self._established_team_text(),
+            root_cause_correct=self._state.detected_root_cause_correct,
+            resolved=self._state.resolved,
+        )
+        reasons = [*reasons, *consistency_reasons]
         self.status_update_scores.append(score)
         self.status_update_reasons.append(reasons)
         self._state.status_updates_sent += 1
         if hallucinated:
             self._state.hallucination_detected = True
+        if mismatch:
+            self._state.communication_mismatch_detected = True
         return self._observation(
             message="Stakeholder update sent.",
-            reward=score - (0.1 if hallucinated else 0.0),
+            reward=score + consistency_penalty - (0.1 if hallucinated else 0.0),
             role=action.agent_role,
             tool_result={
                 "score": score,
                 "reasons": reasons,
                 "hallucinated": hallucinated,
+                "communication_mismatch": mismatch,
+                "consistency_penalty": consistency_penalty,
             },
         )
 
@@ -577,6 +613,8 @@ class IncidentCommanderEnvironment(
                 "tool_history": self.tool_history[-5:],
                 "agent_models": AGENT_MODEL_BY_ROLE,
                 "judge_ensemble_size": DEFAULT_JUDGE_ENSEMBLE_SIZE,
+                "causal_chain_length": len(self.scenario.causal_chain),
+                "red_herring_count": len(self.scenario.red_herrings),
             },
         )
 
@@ -590,6 +628,9 @@ class IncidentCommanderEnvironment(
             fix = 0.0
         update = max(self.status_update_scores) if self.status_update_scores else 0.0
         hallucination = -0.3 if self._state.hallucination_detected else 0.0
+        red_herring = -0.15 if self._state.red_herring_chased else 0.0
+        causal = 0.08 if self._state.causal_chain_traced else 0.0
+        communication = -0.12 if self._state.communication_mismatch_detected else 0.0
         integrity = EVALUATION_INTEGRITY_PENALTY if self._state.integrity_violation_detected else 0.0
         judge_score = max(
             (float(item.get("reward_delta", 0.0)) for item in self.judge_evaluations),
@@ -601,7 +642,7 @@ class IncidentCommanderEnvironment(
             self._state.resolved and not self._state.secondary_outage,
         )
         process = best_evidence_overlap(self.shared_notes, self.scenario) + process_reward
-        total = root + fix + update + speed + hallucination + judge_score + integrity
+        total = root + fix + update + speed + hallucination + red_herring + causal + communication + judge_score + integrity
         return RubricBreakdown(
             root_cause=round(root, 4),
             fix_safety=round(fix, 4),
@@ -609,6 +650,9 @@ class IncidentCommanderEnvironment(
             speed_bonus=round(speed, 4),
             hallucination_penalty=round(hallucination, 4),
             process_reward=round(process, 4),
+            causal_chain=round(causal, 4),
+            red_herring_penalty=round(red_herring, 4),
+            communication_accuracy=round(communication, 4),
             judge_score=round(judge_score, 4),
             integrity_penalty=round(integrity, 4),
             total=round(total, 4),
@@ -618,6 +662,19 @@ class IncidentCommanderEnvironment(
         if is_hidden_scenario(self.scenario.scenario_id):
             return "hidden_eval_case"
         return self.scenario.scenario_id
+
+    def _established_team_text(self) -> str:
+        transcript_text = []
+        for entries in self.private_transcripts.values():
+            transcript_text.extend(str(entry) for entry in entries)
+        return " ".join(
+            [
+                *self.shared_notes,
+                *transcript_text,
+                str(self._state.detected_root_cause or ""),
+                str(self._state.deployed_fix_id or ""),
+            ]
+        )
 
     def _metric_hint(self, metrics: dict[str, list[float]]) -> str:
         if not metrics:

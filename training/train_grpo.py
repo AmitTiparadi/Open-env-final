@@ -113,6 +113,9 @@ Use exact roles only: monitor, investigator, remediator, communicator.
 Use exact tool names only: check_metrics, query_logs, web_search, query_api,
 python_exec, share_note, submit_root_cause, deploy_fix, send_update,
 finish_incident.
+The environment may include plausible red herrings and downstream cascading
+symptoms. Cross-validate logs, metrics, and APIs before naming the causal
+origin. Communicate only facts established by the team.
 Return JSON only. Do not use markdown fences or comments.
 """
 
@@ -128,7 +131,8 @@ Visible alerts:
 
 Produce a complete incident-response JSON list. You may use web_search,
 query_api, or python_exec when useful, but every claim must be backed by
-observations or tool evidence. Use this exact core schema:
+observations or tool evidence. Trace the causal origin rather than only the
+surface symptom, and avoid red herrings. Use this exact core schema:
 [{{"tool_name":"check_metrics","agent_role":"monitor","arguments":{{"service":"{scenario.affected_service}"}}}},
  {{"tool_name":"query_logs","agent_role":"investigator","arguments":{{"service":"{scenario.affected_service}"}}}},
  {{"tool_name":"web_search","agent_role":"investigator","arguments":{{"query":"{scenario.affected_service}"}}}},

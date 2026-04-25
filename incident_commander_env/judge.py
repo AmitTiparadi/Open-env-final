@@ -15,7 +15,9 @@ from incident_commander_env.agent_config import (
 from incident_commander_env.models import AgentRole, IncidentAction
 from incident_commander_env.rewards import (
     EVALUATION_INTEGRITY_PENALTY,
+    causal_chain_score,
     contains_real_evidence,
+    detects_red_herring_chase,
     detects_false_root_cause,
     matches_root_cause,
     score_status_update,
@@ -268,11 +270,17 @@ class EnsembleJudge:
                 continue
             candidate = f"{action.arguments.get('root_cause', '')} {action.arguments.get('evidence', '')}"
             if matches_root_cause(candidate, scenario):
-                root_score = 0.4
+                chain_score = causal_chain_score(candidate, scenario)
+                root_score = 0.4 + chain_score
                 root_rationale = "root cause matches scenario evidence"
+                if chain_score:
+                    root_rationale = f"{root_rationale}; traces causal chain"
             elif detects_false_root_cause(candidate, scenario):
                 root_score = -0.1
                 root_rationale = "root cause conflicts with scenario evidence"
+            elif detects_red_herring_chase(candidate, scenario):
+                root_score = -0.08
+                root_rationale = "root cause chases a planted red herring"
             else:
                 root_score = 0.05 if strictness == 0 else 0.0
                 root_rationale = "root cause is weak or underspecified"
@@ -333,7 +341,7 @@ class EnsembleJudge:
         scores = {
             "root_cause": {
                 "score": round(root_score, 4),
-                "max_score": 0.4,
+                "max_score": 0.48,
                 "rationale": root_rationale,
             },
             "fix_safety": {

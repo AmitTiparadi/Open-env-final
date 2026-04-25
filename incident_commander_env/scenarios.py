@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from random import Random
 from typing import Dict, Iterable, List, Optional
 
@@ -23,6 +23,12 @@ class IncidentScenario:
     evidence_terms: tuple[str, ...]
     red_herrings: tuple[str, ...]
     stakeholder_impact: str
+    causal_chain: tuple[str, ...] = ()
+    origin_service: str = ""
+    symptom_services: tuple[str, ...] = ()
+    red_herring_logs: Dict[str, tuple[str, ...]] = field(default_factory=dict)
+    red_herring_metrics: Dict[str, Dict[str, tuple[float, ...]]] = field(default_factory=dict)
+    misleading_root_causes: tuple[str, ...] = ()
 
 
 SCENARIOS: tuple[IncidentScenario, ...] = (
@@ -74,6 +80,32 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("payment-worker queue", "retail-east tenant"),
         stakeholder_impact="Checkout is slow for a subset of retail-east users; payments are delayed but not failing.",
+        causal_chain=(
+            "checkout-api:v42 recommendations rollout",
+            "heap growth and long GC pauses",
+            "checkout-api latency and OOM risk",
+            "payment-worker queue backs up as a downstream symptom",
+        ),
+        origin_service="checkout-api",
+        symptom_services=("payment-worker",),
+        red_herring_logs={
+            "payment-worker": (
+                "10:06 warn processor_latency_ms=510 provider=paygate-west possible_external_issue=true",
+                "10:07 error transient_payment_decline code=issuer_unavailable sample_size=3",
+            ),
+            "orders-api": (
+                "10:06 warn db_pool_wait_ms=380 endpoint=/orders/create below_slo_threshold=true",
+            ),
+        },
+        red_herring_metrics={
+            "payment-worker": {
+                "processor_latency_ms": (120, 130, 180, 300, 510, 490),
+            },
+            "orders-api": {
+                "db_wait_ms": (60, 65, 80, 130, 250, 380),
+            },
+        },
+        misleading_root_causes=("payment processor outage", "orders db pool exhaustion"),
     ),
     IncidentScenario(
         scenario_id="orders_db_connection_pool",
@@ -121,6 +153,32 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("inventory-sync retries", "catalog reconciliation"),
         stakeholder_impact="New order creation is intermittently failing; inventory sync is a trigger, not the root fault.",
+        causal_chain=(
+            "inventory-sync batch size increase",
+            "orders-api saturates orders-main connection pool",
+            "db wait time and 5xx rise on order creation",
+            "inventory-sync retries increase as a downstream symptom",
+        ),
+        origin_service="orders-api",
+        symptom_services=("inventory-sync",),
+        red_herring_logs={
+            "checkout-api": (
+                "14:22 warn heap_growth_mb=220 route=/cart/quote unrelated_to_orders=true",
+                "14:24 info release=checkout-api:v42 canary_healthy=true",
+            ),
+            "inventory-sync": (
+                "14:25 warn full_catalog_reconciliation still_running suspected_batch_issue=true",
+            ),
+        },
+        red_herring_metrics={
+            "checkout-api": {
+                "memory_percent": (45, 46, 50, 55, 59, 61),
+            },
+            "inventory-sync": {
+                "cpu_percent": (52, 55, 60, 67, 69, 70),
+            },
+        },
+        misleading_root_causes=("checkout memory leak", "inventory sync outage"),
     ),
     IncidentScenario(
         scenario_id="profile_cache_stampede",
@@ -168,6 +226,32 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("cache evictions", "user-feed latency"),
         stakeholder_impact="Profile reads are slow and user-feed is degraded through dependency latency.",
+        causal_chain=(
+            "profile cache TTL feature flag sets ttl_seconds=0",
+            "profile-service cache hit rate collapses",
+            "origin QPS and duplicate rebuilds spike",
+            "user-feed latency rises through dependency calls",
+        ),
+        origin_service="profile-service",
+        symptom_services=("user-feed", "cache"),
+        red_herring_logs={
+            "user-feed": (
+                "09:44 error feed_render_timeout component=ranking possible_root=true",
+                "09:45 warn ranking_model_latency_ms=780 but dependency_wait_ms=1210",
+            ),
+            "cache": (
+                "09:44 warn cache_eviction_spike keyspace=session count=900 unrelated_keyspace=true",
+            ),
+        },
+        red_herring_metrics={
+            "user-feed": {
+                "ranking_latency_ms": (110, 120, 180, 360, 780, 760),
+            },
+            "cache": {
+                "session_evictions": (20, 22, 60, 260, 900, 880),
+            },
+        },
+        misleading_root_causes=("user-feed ranking regression", "cache cluster memory pressure"),
     ),
     IncidentScenario(
         scenario_id="auth_tls_cert_expiry",
@@ -215,6 +299,29 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("login loops", "auth database"),
         stakeholder_impact="Some users cannot log in because edge traffic cannot establish TLS to auth-service.",
+        causal_chain=(
+            "auth-service certificate expires",
+            "edge-gateway TLS handshakes to auth-service fail",
+            "login success rate drops",
+            "support sees intermittent login loops",
+        ),
+        origin_service="auth-service",
+        symptom_services=("edge-gateway",),
+        red_herring_logs={
+            "oauth-database": (
+                "18:03 warn slow_query_ms=640 table=sessions below_incident_threshold=true",
+                "18:04 info connection_pool healthy active=32 max=120",
+            ),
+            "auth-service": (
+                "18:05 warn password_reset_errors count=4 possible_user_report_noise=true",
+            ),
+        },
+        red_herring_metrics={
+            "oauth-database": {
+                "query_p95_ms": (80, 90, 120, 250, 640, 610),
+            },
+        },
+        misleading_root_causes=("oauth database timeout", "password reset regression"),
     ),
 )
 
@@ -276,6 +383,32 @@ HIDDEN_SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("catalog-db replica lag", "ads-ranking timeouts"),
         stakeholder_impact="Mobile shoppers see empty search results; ads are slow because search retries increased.",
+        causal_chain=(
+            "ranker_v73 mobile canary uses embedding_schema=v12",
+            "nan embedding vectors poison ranker cache",
+            "search-api zero-result rate rises for mobile users",
+            "ads-ranking timeouts rise because search retries increase",
+        ),
+        origin_service="search-api",
+        symptom_services=("ads-ranking", "catalog-db"),
+        red_herring_logs={
+            "catalog-db": (
+                "11:36 error bulk_price_import retry_count=8 possible_catalog_staleness=true",
+                "11:38 warn index_refresh_delay_ms=900 below_alert_threshold=true",
+            ),
+            "ads-ranking": (
+                "11:37 error model_timeout model=ads_ranker_v18 canary=false",
+            ),
+        },
+        red_herring_metrics={
+            "catalog-db": {
+                "index_refresh_delay_ms": (90, 120, 260, 510, 900, 850),
+            },
+            "ads-ranking": {
+                "model_latency_ms": (120, 130, 260, 700, 1100, 1050),
+            },
+        },
+        misleading_root_causes=("catalog index lag", "ads ranker timeout"),
     ),
     IncidentScenario(
         scenario_id="hidden_billing_idempotency_drift",
@@ -328,6 +461,32 @@ HIDDEN_SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("payments-api", "ledger-writer latency"),
         stakeholder_impact="Some customers may see duplicate authorization attempts; payment processor health is normal.",
+        causal_chain=(
+            "regional override changes billing idempotency salt",
+            "billing-worker misses previous idempotency keys",
+            "duplicate authorization attempts trigger guards",
+            "ledger-writer queue grows from dedupe events backlog",
+        ),
+        origin_service="billing-worker",
+        symptom_services=("payments-api", "ledger-writer"),
+        red_herring_logs={
+            "payments-api": (
+                "07:14 warn processor_decline_rate=0.022 possible_vendor_issue=true",
+                "07:16 error auth_timeout sample=5 provider=paygate-east",
+            ),
+            "ledger-writer": (
+                "07:17 warn disk_queue_flush_ms=540 possible_storage_issue=true",
+            ),
+        },
+        red_herring_metrics={
+            "payments-api": {
+                "processor_decline_rate": (0.004, 0.005, 0.011, 0.018, 0.022, 0.021),
+            },
+            "ledger-writer": {
+                "disk_flush_ms": (40, 45, 90, 220, 540, 520),
+            },
+        },
+        misleading_root_causes=("payment processor outage", "ledger storage latency"),
     ),
     IncidentScenario(
         scenario_id="hidden_notification_poison_pill",
@@ -375,6 +534,29 @@ HIDDEN_SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("email-provider 429s", "vendor limit"),
         stakeholder_impact="User notifications are delayed; the provider is healthy and one poison message is blocking progress.",
+        causal_chain=(
+            "promo_v9 message cannot deserialize",
+            "notification-worker retries the same poison message",
+            "queue shard 3 workers crash repeatedly",
+            "notification delivery lag grows while provider remains healthy",
+        ),
+        origin_service="notification-worker",
+        symptom_services=("email-provider",),
+        red_herring_logs={
+            "email-provider": (
+                "16:03 error smtp_421 temporary_failure region=us-east sample=2",
+                "16:04 warn vendor_rate_limit_header present but remaining_capacity=74",
+            ),
+            "template-service": (
+                "16:02 warn template_cache_miss_rate=0.18 possible_template_issue=true",
+            ),
+        },
+        red_herring_metrics={
+            "template-service": {
+                "cache_miss_rate": (0.02, 0.03, 0.07, 0.12, 0.18, 0.17),
+            },
+        },
+        misleading_root_causes=("email provider rate limit", "template cache miss"),
     ),
     IncidentScenario(
         scenario_id="hidden_edge_limiter_cardinality",
@@ -428,6 +610,32 @@ HIDDEN_SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         red_herrings=("auth-service login failures", "redis memory"),
         stakeholder_impact="Users are incorrectly throttled at the edge; auth failures are downstream of edge 429s.",
+        causal_chain=(
+            "edge rate-limit config adds request_id to key",
+            "rate-limit key cardinality explodes",
+            "redis rate-limit backend saturates CPU",
+            "edge 429s rise and auth logins fail downstream",
+        ),
+        origin_service="edge-gateway",
+        symptom_services=("redis-rate-limit", "auth-service"),
+        red_herring_logs={
+            "auth-service": (
+                "20:46 error token_refresh_failed sample=11 possible_auth_bug=true",
+                "20:47 info oauth_database healthy=true",
+            ),
+            "redis-rate-limit": (
+                "20:45 warn memory_fragmentation_ratio=1.9 possible_memory_issue=true",
+            ),
+        },
+        red_herring_metrics={
+            "auth-service": {
+                "token_refresh_error_rate": (0.001, 0.002, 0.01, 0.025, 0.04, 0.038),
+            },
+            "redis-rate-limit": {
+                "memory_fragmentation_ratio": (1.1, 1.2, 1.4, 1.7, 1.9, 1.9),
+            },
+        },
+        misleading_root_causes=("auth token refresh regression", "redis memory fragmentation"),
     ),
 )
 
@@ -484,6 +692,7 @@ def render_logs(
     limit: int = 5,
 ) -> list[str]:
     lines = list(scenario.logs.get(service, ()))
+    lines.extend(scenario.red_herring_logs.get(service, ()))
     if query:
         terms = [term.strip().lower() for term in query.split() if term.strip()]
         filtered = [
@@ -500,7 +709,10 @@ def render_metrics(
     service: str,
     metric: str = "",
 ) -> dict[str, list[float]]:
-    metrics = scenario.metrics.get(service, {})
+    metrics = {
+        **scenario.metrics.get(service, {}),
+        **scenario.red_herring_metrics.get(service, {}),
+    }
     if metric:
         return {metric: list(metrics.get(metric, ()))}
     return {name: list(values) for name, values in metrics.items()}

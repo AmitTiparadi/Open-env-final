@@ -95,6 +95,41 @@ def evidence_terms_for(scenario: IncidentScenario) -> tuple[str, ...]:
     return tuple(dict.fromkeys((*scenario.evidence_terms, *aliases)))
 
 
+def causal_chain_terms_for(scenario: IncidentScenario) -> tuple[str, ...]:
+    terms: list[str] = []
+    for item in scenario.causal_chain:
+        terms.extend(token for token in normalize_text(item).split() if len(token) > 3)
+    if scenario.origin_service:
+        terms.append(scenario.origin_service)
+    return tuple(dict.fromkeys(terms))
+
+
+def red_herring_terms_for(scenario: IncidentScenario) -> tuple[str, ...]:
+    terms = list(scenario.red_herrings) + list(scenario.misleading_root_causes)
+    for service, lines in scenario.red_herring_logs.items():
+        terms.append(service)
+        terms.extend(lines)
+    for service, metrics in scenario.red_herring_metrics.items():
+        terms.append(service)
+        terms.extend(metrics.keys())
+    return tuple(dict.fromkeys(terms))
+
+
+def _phrase_negated(text: str, phrase: str) -> bool:
+    normalized_phrase = normalize_text(phrase)
+    return any(
+        marker in text
+        for marker in (
+            f"not {normalized_phrase}",
+            f"not the {normalized_phrase}",
+            f"not a {normalized_phrase}",
+            f"not an {normalized_phrase}",
+            f"not root cause {normalized_phrase}",
+            f"{normalized_phrase} is not",
+        )
+    )
+
+
 def matches_root_cause(candidate: str, scenario: IncidentScenario) -> bool:
     text = normalize_text(candidate)
     if normalize_text(scenario.root_cause) in text:
@@ -111,12 +146,68 @@ def detects_false_root_cause(text: str, scenario: IncidentScenario) -> bool:
     normalized = normalize_text(text)
     if any(term in normalized for term in FALSE_ROOT_CAUSE_TERMS):
         return True
+    for term in scenario.misleading_root_causes:
+        normalized_term = normalize_text(term)
+        if normalized_term in normalized and not _phrase_negated(normalized, term):
+            return True
     other_aliases: list[str] = []
     for root, aliases in ROOT_CAUSE_ALIASES.items():
         if root != scenario.root_cause:
             other_aliases.extend(aliases)
             other_aliases.append(root)
     return any(normalize_text(alias) in normalized for alias in other_aliases)
+
+
+def detects_red_herring_chase(text: str, scenario: IncidentScenario) -> bool:
+    normalized = normalize_text(text)
+    if matches_root_cause(text, scenario):
+        return False
+    for term in red_herring_terms_for(scenario):
+        normalized_term = normalize_text(term)
+        if normalized_term and normalized_term in normalized and not _phrase_negated(normalized, term):
+            return True
+    return False
+
+
+def causal_chain_score(text: str, scenario: IncidentScenario) -> float:
+    terms = [term for term in causal_chain_terms_for(scenario) if term]
+    if not terms:
+        return 0.0
+    normalized = normalize_text(text)
+    hits = sum(1 for term in terms if normalize_text(term) in normalized)
+    origin_bonus = 1 if scenario.origin_service and normalize_text(scenario.origin_service) in normalized else 0
+    return min(0.08, round(0.008 * hits + 0.016 * origin_bonus, 4))
+
+
+def communication_consistency_penalty(
+    message: str,
+    scenario: IncidentScenario,
+    established_text: str,
+    root_cause_correct: bool,
+    resolved: bool,
+) -> tuple[float, bool, list[str]]:
+    normalized = normalize_text(message)
+    established = normalize_text(established_text)
+    reasons: list[str] = []
+    penalty = 0.0
+    mismatch = False
+
+    if detects_red_herring_chase(message, scenario):
+        penalty -= 0.12
+        mismatch = True
+        reasons.append("communicates red herring as likely cause")
+    if ("resolved" in normalized or "mitigated" in normalized) and not resolved:
+        penalty -= 0.08
+        mismatch = True
+        reasons.append("claims mitigation before fix")
+    if ("root cause" in normalized or "caused by" in normalized) and not root_cause_correct:
+        penalty -= 0.08
+        mismatch = True
+        reasons.append("claims root cause before team confirmation")
+    if root_cause_correct and scenario.root_cause not in established and scenario.root_cause in normalized:
+        penalty -= 0.03
+        reasons.append("root cause not present in shared evidence text")
+    return penalty, mismatch, reasons
 
 
 def score_status_update(

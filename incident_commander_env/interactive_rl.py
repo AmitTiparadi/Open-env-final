@@ -331,6 +331,8 @@ class InteractiveRolloutRunner:
             and env.state.detected_root_cause_correct
             and not env.state.secondary_outage
             and not env.state.hallucination_detected
+            and not env.state.red_herring_chased
+            and not env.state.communication_mismatch_detected
             and not env.state.integrity_violation_detected
         )
         accepted = bool(

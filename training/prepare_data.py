@@ -30,13 +30,22 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def scenario_services(scenario: IncidentScenario) -> list[str]:
-    services = set(scenario.logs) | set(scenario.metrics) | {scenario.affected_service}
+    services = (
+        set(scenario.logs)
+        | set(scenario.metrics)
+        | set(scenario.red_herring_logs)
+        | set(scenario.red_herring_metrics)
+        | {scenario.affected_service}
+    )
     return sorted(services)
 
 
 def metric_summary(scenario: IncidentScenario) -> str:
     parts: list[str] = []
-    for service, metrics in scenario.metrics.items():
+    merged_metrics = {service: dict(metrics) for service, metrics in scenario.metrics.items()}
+    for service, metrics in scenario.red_herring_metrics.items():
+        merged_metrics.setdefault(service, {}).update(metrics)
+    for service, metrics in merged_metrics.items():
         for name, values in metrics.items():
             if not values:
                 continue
@@ -52,12 +61,14 @@ def make_pretrain_rows() -> list[dict[str, Any]]:
         alerts = " ".join(scenario.alerts)
         logs = " ".join(
             line
-            for service_lines in scenario.logs.values()
+            for service_lines in [*scenario.logs.values(), *scenario.red_herring_logs.values()]
             for line in service_lines
         )
         metrics = metric_summary(scenario)
         safe_fixes = ", ".join(scenario.safe_fix_ids)
         dangerous_fixes = ", ".join(scenario.dangerous_fix_ids)
+        causal_chain = " -> ".join(scenario.causal_chain)
+        misleading = ", ".join(scenario.misleading_root_causes)
 
         rows.append(
             {
@@ -73,6 +84,8 @@ def make_pretrain_rows() -> list[dict[str, Any]]:
                     f"The root cause was {scenario.root_cause}. "
                     f"Safe remediation options were: {safe_fixes}. "
                     f"Unsafe remediations to avoid were: {dangerous_fixes}. "
+                    f"Causal chain: {causal_chain}. "
+                    f"Plausible but misleading causes were: {misleading}. "
                     f"Stakeholder impact: {scenario.stakeholder_impact}"
                 ),
             }
@@ -89,7 +102,8 @@ def make_pretrain_rows() -> list[dict[str, Any]]:
                     f"Do not claim a root cause until evidence links symptoms to "
                     f"{scenario.root_cause}. Prefer {scenario.canonical_fix_id} when "
                     f"the evidence matches this incident. Avoid red herrings such as "
-                    f"{', '.join(scenario.red_herrings)}."
+                    f"{', '.join(scenario.red_herrings)} and validate the origin chain: "
+                    f"{causal_chain}."
                 ),
             }
         )
@@ -112,7 +126,7 @@ def make_pretrain_rows() -> list[dict[str, Any]]:
 
 def assistant_actions_for_scenario(scenario: IncidentScenario) -> str:
     service = scenario.affected_service
-    evidence = " ".join(scenario.evidence_terms[:4])
+    evidence = " ".join((*scenario.evidence_terms[:4], *scenario.causal_chain[:2]))
     actions = [
         {
             "tool_name": "check_metrics",
