@@ -246,7 +246,10 @@ python training/train_sft.py \
 
 # 10% RL post-training with environment rewards
 python training/train_grpo.py --dry-run
-python training/train_grpo.py
+python training/train_grpo.py \
+  --model-name YOUR_USERNAME/incident-commander-sft \
+  --push-to-hub \
+  --hub-model-id YOUR_USERNAME/incident-commander-grpo
 ```
 
 Before running training on a GPU Space, install the training dependencies:

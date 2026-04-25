@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,6 +23,8 @@ if str(ROOT) not in sys.path:
 from incident_commander_env.models import AgentRole, IncidentAction
 from incident_commander_env.server.incident_environment import IncidentCommanderEnvironment
 
+DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_OUTPUT = ROOT / "outputs" / "grpo_incident_commander"
 
 SYSTEM_PROMPT = """You are an incident-response policy.
 Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
@@ -110,7 +113,7 @@ def dry_run() -> None:
     )
 
 
-def train() -> None:
+def train(args: argparse.Namespace) -> None:
     try:
         from datasets import Dataset
         from trl import GRPOConfig, GRPOTrainer
@@ -121,15 +124,16 @@ def train() -> None:
             f"runtime before running full GRPO. Import error: {exc}"
         )
 
-    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=4096,
+        model_name=args.model_name,
+        max_seq_length=args.max_seq_length,
         load_in_4bit=True,
     )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model = FastLanguageModel.get_peft_model(
         model,
-        r=16,
+        r=args.lora_r,
         target_modules=[
             "q_proj",
             "k_proj",
@@ -139,7 +143,7 @@ def train() -> None:
             "up_proj",
             "down_proj",
         ],
-        lora_alpha=16,
+        lora_alpha=args.lora_alpha,
         use_gradient_checkpointing="unsloth",
     )
     prompts = [
@@ -161,14 +165,20 @@ def train() -> None:
     ]
     dataset = Dataset.from_list(prompts)
     config = GRPOConfig(
-        output_dir="outputs/grpo_incident_commander",
-        num_generations=4,
-        max_prompt_length=1024,
-        max_completion_length=1024,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,
+        output_dir=str(args.output_dir),
+        num_generations=args.num_generations,
+        max_prompt_length=args.max_prompt_length,
+        max_completion_length=args.max_completion_length,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         logging_steps=1,
-        max_steps=50,
+        max_steps=args.max_steps,
+        learning_rate=args.learning_rate,
+        report_to=args.report_to,
+        run_name=args.run_name,
+        push_to_hub=args.push_to_hub,
+        hub_model_id=args.hub_model_id,
+        hub_strategy="every_save" if args.push_to_hub else "end",
     )
     trainer = GRPOTrainer(
         model=model,
@@ -178,17 +188,37 @@ def train() -> None:
         reward_funcs=incident_reward_func,
     )
     trainer.train()
-    trainer.save_model("outputs/grpo_incident_commander/final")
+    trainer.save_model(str(args.output_dir / "final"))
+    if args.push_to_hub:
+        trainer.push_to_hub()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--model-name", default=os.getenv("RL_BASE_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--hub-model-id", default=os.getenv("RL_HUB_MODEL_ID"))
+    parser.add_argument("--push-to-hub", action="store_true")
+    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--max-seq-length", type=int, default=4096)
+    parser.add_argument("--max-prompt-length", type=int, default=1024)
+    parser.add_argument("--max-completion-length", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--learning-rate", type=float, default=5e-6)
+    parser.add_argument("--num-generations", type=int, default=4)
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=16)
+    parser.add_argument("--report-to", default=os.getenv("REPORT_TO", "none"))
+    parser.add_argument("--run-name", default="incident-commander-grpo")
     args = parser.parse_args()
+    if args.push_to_hub and not args.hub_model_id:
+        raise SystemExit("--hub-model-id is required when --push-to-hub is set")
     if args.dry_run:
         dry_run()
     else:
-        train()
+        train(args)
 
 
 if __name__ == "__main__":
