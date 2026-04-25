@@ -216,6 +216,19 @@ This project includes a minimal GRPO training scaffold:
 python training/train_grpo.py
 ```
 
+For Hugging Face Jobs, do not run the stage scripts by URL directly. A Jobs run
+downloads only the single script URL, not the whole Space repository. Use the
+bootstrap runner instead:
+
+```bash
+hf jobs uv run \
+  --flavor t4-small \
+  --timeout 30m \
+  --secrets HF_TOKEN \
+  "https://huggingface.co/spaces/AmitTiparadi/Open-env-finals/resolve/main/training/run_hf_job.py" \
+  --stage pretrain -- --dry-run
+```
+
 Generate the reproducible datasets first:
 
 ```bash
@@ -337,6 +350,7 @@ server/
   Dockerfile
 training/
   prepare_data.py
+  run_hf_job.py
   train_pretrain.py
   train_sft.py
   train_grpo.py
