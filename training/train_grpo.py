@@ -32,8 +32,25 @@ and arguments. Use only evidence from tool outputs and shared notes.
 """
 
 
-def parse_actions(completion: str) -> list[IncidentAction]:
-    match = re.search(r"\[[\s\S]*\]", completion)
+def completion_to_text(completion: Any) -> str:
+    if isinstance(completion, str):
+        return completion
+    if isinstance(completion, dict):
+        return str(completion.get("content", completion))
+    if isinstance(completion, list):
+        parts = []
+        for item in completion:
+            if isinstance(item, dict):
+                parts.append(str(item.get("content", "")))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(completion)
+
+
+def parse_actions(completion: Any) -> list[IncidentAction]:
+    completion_text = completion_to_text(completion)
+    match = re.search(r"\[[\s\S]*\]", completion_text)
     if not match:
         return []
     try:
