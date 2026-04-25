@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from incident_commander_env.scenarios import get_scenario
+from training.train_grpo import render_prompt
 from training.generate_targeted_data import (
     make_targeted_pretrain_rows,
     make_targeted_sft_rows,
@@ -35,6 +37,13 @@ class TargetedDataTests(unittest.TestCase):
         self.assertIn("cascading chain", text)
         self.assertIn("compact json array", text)
         self.assertIn("communicator", text)
+
+    def test_grpo_prompt_prefills_json_array(self) -> None:
+        prompt = render_prompt(get_scenario("checkout_bad_deploy_memory_leak"))
+        self.assertIsInstance(prompt, str)
+        self.assertIn("/no_think", prompt)
+        self.assertIn("<|im_start|>assistant\n[", prompt)
+        self.assertTrue(prompt.endswith("["))
 
 
 if __name__ == "__main__":

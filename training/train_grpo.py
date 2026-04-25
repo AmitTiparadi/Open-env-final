@@ -124,7 +124,7 @@ explanations, or repeated plans.
 """
 
 
-def render_prompt(scenario: IncidentScenario) -> list[dict[str, str]]:
+def render_prompt(scenario: IncidentScenario) -> str:
     alerts = "\n".join(f"- {alert}" for alert in scenario.alerts)
     user_prompt = f"""/no_think
 Incident started.
@@ -143,10 +143,16 @@ Do not write "Thinking Process", "The user wants", "Let me", analysis text, or
 `</think>`. The first character must be `[` and the last character must be `]`.
 End the answer immediately after the closing JSON bracket.
 """
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
+    return (
+        "<|im_start|>system\n"
+        f"{SYSTEM_PROMPT}"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{user_prompt}"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "["
+    )
 
 
 def completion_to_text(completion: Any) -> str:
@@ -361,6 +367,8 @@ def completion_quality_reward(completion: Any, actions: list[IncidentAction]) ->
     reward = 0.0
     if text.startswith("[") and text.endswith("]"):
         reward += 0.08
+    elif text.startswith("{") and (text.endswith("]") or text.endswith("}")):
+        reward += 0.06
     elif text.startswith(("{", "[")) and text.endswith(("}", "]")):
         reward += 0.035
     else:
@@ -377,7 +385,7 @@ def completion_quality_reward(completion: Any, actions: list[IncidentAction]) ->
         "analyze the request",
     )
     if any(marker in text_lower for marker in thinking_markers):
-        reward -= 0.35
+        reward -= 1.0
     if actions:
         if actions[-1].tool_name == "finish_incident":
             reward += 0.04
