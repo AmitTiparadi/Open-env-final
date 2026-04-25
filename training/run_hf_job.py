@@ -53,14 +53,8 @@ def main() -> None:
         default="pretrain",
         help="Training stage to run.",
     )
-    parser.add_argument(
-        "stage_args",
-        nargs=argparse.REMAINDER,
-        help="Arguments forwarded to the selected stage after optional -- separator.",
-    )
-    args = parser.parse_args()
-
-    stage_args = list(args.stage_args)
+    args, stage_args = parser.parse_known_args()
+    stage_args = list(stage_args)
     if stage_args and stage_args[0] == "--":
         stage_args = stage_args[1:]
 
@@ -77,9 +71,15 @@ def main() -> None:
         )
     )
 
-    print("Installing project with training extras...", flush=True)
+    is_dry_run = "--dry-run" in stage_args or args.stage == "prepare"
+    extras_target = ".[training]" if not is_dry_run else "."
+
+    print(
+        f"Installing project {'with training extras' if not is_dry_run else 'without training extras'}...",
+        flush=True,
+    )
     run([sys.executable, "-m", "pip", "install", "-U", "pip"], cwd=repo_path)
-    run([sys.executable, "-m", "pip", "install", "-e", ".[training]"], cwd=repo_path)
+    run([sys.executable, "-m", "pip", "install", "-e", extras_target], cwd=repo_path)
 
     if args.stage != "prepare":
         data_path = repo_path / "data" / "pretrain_corpus.jsonl"
