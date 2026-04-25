@@ -26,6 +26,43 @@ from incident_commander_env.server.incident_environment import IncidentCommander
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 DEFAULT_OUTPUT = ROOT / "outputs" / "grpo_incident_commander"
+VALID_TOOL_NAMES = {
+    "list_tools",
+    "check_metrics",
+    "query_logs",
+    "share_note",
+    "submit_root_cause",
+    "deploy_fix",
+    "send_update",
+    "finish_incident",
+}
+TOOL_ALIASES = {
+    "check_metric": "check_metrics",
+    "metrics": "check_metrics",
+    "logs": "query_logs",
+    "query_log": "query_logs",
+    "note": "share_note",
+    "share": "share_note",
+    "root_cause": "submit_root_cause",
+    "submit": "submit_root_cause",
+    "fix": "deploy_fix",
+    "deploy": "deploy_fix",
+    "update": "send_update",
+    "communicate": "send_update",
+    "finish": "finish_incident",
+    "close": "finish_incident",
+}
+ROLE_ALIASES = {
+    "monitoring": AgentRole.MONITOR.value,
+    "monitor": AgentRole.MONITOR.value,
+    "investigate": AgentRole.INVESTIGATOR.value,
+    "investigator": AgentRole.INVESTIGATOR.value,
+    "remediate": AgentRole.REMEDIATOR.value,
+    "remediator": AgentRole.REMEDIATOR.value,
+    "communicate": AgentRole.COMMUNICATOR.value,
+    "communicator": AgentRole.COMMUNICATOR.value,
+}
+_DEBUG_REWARD_COUNT = 0
 
 SYSTEM_PROMPT = """You are an incident-response policy.
 Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
@@ -68,22 +105,124 @@ def completion_to_text(completion: Any) -> str:
     return str(completion)
 
 
+def normalize_name(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def normalize_tool_name(value: Any) -> str:
+    name = normalize_name(value)
+    return TOOL_ALIASES.get(name, name)
+
+
+def normalize_role(value: Any) -> str:
+    role = normalize_name(value)
+    return ROLE_ALIASES.get(role, role)
+
+
+def json_values_from_text(text: str) -> list[Any]:
+    decoder = json.JSONDecoder()
+    values = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char not in "[{":
+            index += 1
+            continue
+        try:
+            value, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        values.append(value)
+        index += max(end, 1)
+    return values
+
+
+def candidate_action_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("actions", "tool_calls", "calls", "steps"):
+        if isinstance(payload.get(key), list):
+            return payload[key]
+    if any(key in payload for key in ("tool_name", "tool", "name", "agent_role", "role")):
+        return [payload]
+    return []
+
+
+def normalize_action_item(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if isinstance(item.get("action"), dict):
+        nested = normalize_action_item(item["action"])
+        if nested:
+            return nested
+
+    arguments = (
+        item.get("arguments")
+        or item.get("args")
+        or item.get("parameters")
+        or item.get("input")
+        or {}
+    )
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {"text": arguments}
+    if not isinstance(arguments, dict):
+        arguments = {"value": arguments}
+
+    tool_name = item.get("tool_name") or item.get("tool") or item.get("name")
+    agent_role = (
+        item.get("agent_role")
+        or item.get("role")
+        or item.get("agent")
+        or item.get("actor")
+        or arguments.pop("agent_role", None)
+        or arguments.pop("role", None)
+    )
+    normalized = {
+        "tool_name": normalize_tool_name(tool_name),
+        "agent_role": normalize_role(agent_role),
+        "arguments": arguments,
+    }
+    if not normalized["tool_name"] or not normalized["agent_role"]:
+        return None
+    return normalized
+
+
 def parse_actions(completion: Any) -> list[IncidentAction]:
     completion_text = completion_to_text(completion)
-    match = re.search(r"\[[\s\S]*\]", completion_text)
-    if not match:
-        return []
-    try:
-        payload = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
     actions = []
-    for item in payload:
-        try:
-            actions.append(IncidentAction.model_validate(item))
-        except Exception:
-            continue
+    for payload in json_values_from_text(completion_text):
+        for item in candidate_action_items(payload):
+            normalized = normalize_action_item(item)
+            if not normalized:
+                continue
+            try:
+                actions.append(IncidentAction.model_validate(normalized))
+            except Exception:
+                continue
+            if len(actions) >= 8:
+                return actions
     return actions[:8]
+
+
+def format_fallback_reward(completion: Any) -> float:
+    text = completion_to_text(completion)
+    text_lower = text.lower()
+    reward = -0.05
+    if json_values_from_text(text):
+        reward += 0.015
+    mentioned_tools = {
+        tool_name for tool_name in VALID_TOOL_NAMES if tool_name in text_lower
+    }
+    reward += min(0.035, 0.005 * len(mentioned_tools))
+    if "tool_name" in text_lower or "agent_role" in text_lower:
+        reward += 0.01
+    return round(reward, 4)
 
 
 def rollout_completion(
@@ -96,10 +235,11 @@ def rollout_completion(
     obs = env.reset(seed=seed, difficulty=difficulty, scenario_id=scenario_id)
     actions = parse_actions(completion)
     if not actions:
-        return -0.05
+        return format_fallback_reward(completion)
 
     tool_names = [action.tool_name for action in actions]
-    reward = min(0.04, 0.005 * len(actions))
+    valid_tool_count = sum(tool_name in VALID_TOOL_NAMES for tool_name in tool_names)
+    reward = min(0.05, 0.006 * valid_tool_count)
     if "submit_root_cause" in tool_names:
         root_cause_index = tool_names.index("submit_root_cause")
         prior_tools = set(tool_names[:root_cause_index])
@@ -117,6 +257,27 @@ def rollout_completion(
     return reward
 
 
+def maybe_debug_reward(
+    completion: Any,
+    actions: list[IncidentAction],
+    reward: float,
+    scenario_id: str | None,
+) -> None:
+    global _DEBUG_REWARD_COUNT
+    limit = int(os.getenv("GRPO_DEBUG_REWARD_SAMPLES", "0"))
+    if _DEBUG_REWARD_COUNT >= limit:
+        return
+    _DEBUG_REWARD_COUNT += 1
+    payload = {
+        "debug_reward_sample": _DEBUG_REWARD_COUNT,
+        "scenario_id": scenario_id,
+        "reward": round(float(reward), 4),
+        "parsed_actions": [action.model_dump(mode="json") for action in actions],
+        "completion_preview": completion_to_text(completion)[:1200],
+    }
+    print(json.dumps(payload, ensure_ascii=True), flush=True)
+
+
 def incident_reward_func(completions: list[str], **kwargs: Any) -> list[float]:
     seeds = kwargs.get("seed")
     scenario_ids = kwargs.get("scenario_id")
@@ -131,15 +292,18 @@ def incident_reward_func(completions: list[str], **kwargs: Any) -> list[float]:
             return values[index % len(values)]
         return values
 
-    return [
-        rollout_completion(
+    rewards = []
+    for i, completion in enumerate(completions):
+        scenario_id = value_at(scenario_ids, i, None)
+        reward = rollout_completion(
             completion,
             seed=int(value_at(seeds, i, i)),
             difficulty=str(value_at(difficulties, i, "mixed")),
-            scenario_id=value_at(scenario_ids, i, None),
+            scenario_id=scenario_id,
         )
-        for i, completion in enumerate(completions)
-    ]
+        maybe_debug_reward(completion, parse_actions(completion), reward, scenario_id)
+        rewards.append(reward)
+    return rewards
 
 
 def configure_special_tokens(model: Any, tokenizer: Any) -> str:
@@ -237,6 +401,96 @@ def dry_run() -> None:
     )
 
 
+def reward_probe() -> None:
+    examples = {
+        "ideal": json.dumps(
+            [
+                {
+                    "tool_name": "check_metrics",
+                    "agent_role": "monitor",
+                    "arguments": {"service": "checkout-api"},
+                },
+                {
+                    "tool_name": "query_logs",
+                    "agent_role": "investigator",
+                    "arguments": {"service": "checkout-api"},
+                },
+                {
+                    "tool_name": "submit_root_cause",
+                    "agent_role": "investigator",
+                    "arguments": {
+                        "root_cause": "bad_deploy_memory_leak",
+                        "evidence": "checkout-api:v42 heap_growth_mb memory gc_pause_ms",
+                    },
+                },
+                {
+                    "tool_name": "deploy_fix",
+                    "agent_role": "remediator",
+                    "arguments": {"fix_id": "rollback_checkout_api_v42"},
+                },
+                {
+                    "tool_name": "send_update",
+                    "agent_role": "communicator",
+                    "arguments": {
+                        "message": (
+                            "checkout-api impact is mitigated. Root cause was "
+                            "bad_deploy_memory_leak. Rollback deployed."
+                        )
+                    },
+                },
+                {
+                    "tool_name": "finish_incident",
+                    "agent_role": "communicator",
+                    "arguments": {"summary": "checkout-api incident mitigated"},
+                },
+            ]
+        ),
+        "fenced_aliases": """```json
+{"actions": [
+  {"tool": "metrics", "role": "monitor", "args": {"service": "checkout-api"}},
+  {"tool": "logs", "role": "investigator", "args": {"service": "checkout-api"}},
+  {"tool": "root_cause", "role": "investigator", "args": {"root_cause": "bad deploy memory leak", "evidence": "checkout-api:v42 heap_growth_mb gc_pause_ms"}},
+  {"tool": "fix", "role": "remediator", "args": {"fix_id": "rollback_checkout_api_v42"}}
+]}
+```""",
+        "openenv_style": json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "call_tool",
+                        "tool_name": "submit_root_cause",
+                        "arguments": {
+                            "agent_role": "investigator",
+                            "root_cause": "bad_deploy_memory_leak",
+                            "evidence": "checkout-api:v42 heap_growth_mb gc_pause_ms",
+                        },
+                    }
+                ]
+            }
+        ),
+        "tool_words_no_json": (
+            "I will check_metrics, query_logs, submit_root_cause, deploy_fix, "
+            "send_update, and finish_incident."
+        ),
+    }
+    rows = []
+    for name, completion in examples.items():
+        actions = parse_actions(completion)
+        reward = rollout_completion(
+            completion,
+            scenario_id="checkout_bad_deploy_memory_leak",
+        )
+        rows.append(
+            {
+                "name": name,
+                "parsed_actions": len(actions),
+                "tools": [action.tool_name for action in actions],
+                "reward": round(float(reward), 4),
+            }
+        )
+    print(json.dumps(rows, indent=2))
+
+
 def train(args: argparse.Namespace) -> None:
     try:
         from datasets import Dataset
@@ -255,6 +509,8 @@ def train(args: argparse.Namespace) -> None:
     )
     configure_special_tokens(model, tokenizer)
     model = ensure_peft_model(model, FastLanguageModel, args)
+    if args.debug_reward_samples:
+        os.environ["GRPO_DEBUG_REWARD_SAMPLES"] = str(args.debug_reward_samples)
     prompts = []
     for i in range(args.num_prompts):
         scenario = generate_scenario(seed=i, difficulty=args.difficulty)
@@ -301,6 +557,7 @@ def train(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--reward-probe", action="store_true")
     parser.add_argument("--model-name", default=os.getenv("RL_BASE_MODEL", DEFAULT_MODEL))
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--hub-model-id", default=os.getenv("RL_HUB_MODEL_ID"))
@@ -321,11 +578,14 @@ def main() -> None:
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--num-prompts", type=int, default=64)
     parser.add_argument("--difficulty", default="mixed")
+    parser.add_argument("--debug-reward-samples", type=int, default=0)
     args = parser.parse_args()
     if args.push_to_hub and not args.hub_model_id:
         raise SystemExit("--hub-model-id is required when --push-to-hub is set")
     if args.dry_run:
         dry_run()
+    elif args.reward_probe:
+        reward_probe()
     else:
         train(args)
 
