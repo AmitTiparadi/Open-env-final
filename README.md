@@ -216,6 +216,18 @@ This project includes a minimal GRPO training scaffold:
 python training/train_grpo.py
 ```
 
+Generate the reproducible datasets first:
+
+```bash
+python training/prepare_data.py
+```
+
+This creates:
+
+- `data/pretrain_corpus.jsonl`
+- `data/sft_trajectories.jsonl`
+- `data/eval_scenarios.jsonl`
+
 Before running training on a GPU Space, install the training dependencies:
 
 ```bash
@@ -300,7 +312,12 @@ server/
   app.py
   Dockerfile
 training/
+  prepare_data.py
   train_grpo.py
+data/
+  pretrain_corpus.jsonl
+  sft_trajectories.jsonl
+  eval_scenarios.jsonl
 scripts/
   run_demo.py
   evaluate_baseline.py
