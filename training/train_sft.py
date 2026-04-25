@@ -135,6 +135,27 @@ def configure_special_tokens(model: Any, tokenizer: Any) -> str:
     return eos_token
 
 
+def ensure_peft_model(model: Any, FastLanguageModel: Any, args: argparse.Namespace) -> Any:
+    if getattr(model, "peft_config", None) is not None:
+        return model
+    return FastLanguageModel.get_peft_model(
+        model,
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+        use_gradient_checkpointing="unsloth",
+        random_state=args.seed,
+    )
+
+
 def maybe_apply_chat_template(dataset: Any, tokenizer: Any) -> Any:
     def render(example: dict[str, Any]) -> dict[str, str]:
         messages = example["messages"]
@@ -164,22 +185,7 @@ def train(args: argparse.Namespace) -> None:
         load_in_4bit=True,
     )
     eos_token = configure_special_tokens(model, tokenizer)
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-        use_gradient_checkpointing="unsloth",
-        random_state=args.seed,
-    )
+    model = ensure_peft_model(model, FastLanguageModel, args)
 
     dataset = load_dataset("json", data_files=str(args.data_path), split="train")
     dataset = maybe_apply_chat_template(dataset, tokenizer)

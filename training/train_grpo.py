@@ -75,6 +75,63 @@ def incident_reward_func(completions: list[str], **kwargs: Any) -> list[float]:
     ]
 
 
+def configure_special_tokens(model: Any, tokenizer: Any) -> str:
+    def token_id(token: str | None) -> int | None:
+        if not token:
+            return None
+        value = tokenizer.convert_tokens_to_ids(token)
+        if value is None:
+            return None
+        if getattr(tokenizer, "unk_token_id", None) is not None and value == tokenizer.unk_token_id:
+            return None
+        return int(value)
+
+    eos_token = None
+    eos_token_id = None
+    for candidate in ("<|im_end|>", tokenizer.eos_token, "<|endoftext|>"):
+        candidate_id = token_id(candidate)
+        if candidate_id is not None:
+            eos_token = candidate
+            eos_token_id = candidate_id
+            break
+    if eos_token is None or eos_token_id is None:
+        raise ValueError("Could not find a valid EOS token in the tokenizer vocabulary.")
+
+    tokenizer.eos_token = eos_token
+    tokenizer.eos_token_id = eos_token_id
+    if tokenizer.pad_token is None or token_id(tokenizer.pad_token) is None:
+        tokenizer.pad_token = eos_token
+        tokenizer.pad_token_id = eos_token_id
+
+    if getattr(model, "config", None) is not None:
+        model.config.eos_token_id = eos_token_id
+        model.config.pad_token_id = tokenizer.pad_token_id
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.eos_token_id = eos_token_id
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+    return eos_token
+
+
+def ensure_peft_model(model: Any, FastLanguageModel: Any, args: argparse.Namespace) -> Any:
+    if getattr(model, "peft_config", None) is not None:
+        return model
+    return FastLanguageModel.get_peft_model(
+        model,
+        r=args.lora_r,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+        lora_alpha=args.lora_alpha,
+        use_gradient_checkpointing="unsloth",
+    )
+
+
 def dry_run() -> None:
     example = json.dumps(
         [
@@ -116,8 +173,8 @@ def dry_run() -> None:
 def train(args: argparse.Namespace) -> None:
     try:
         from datasets import Dataset
-        from trl import GRPOConfig, GRPOTrainer
         from unsloth import FastLanguageModel
+        from trl import GRPOConfig, GRPOTrainer
     except Exception as exc:
         raise SystemExit(
             "Install TRL, Unsloth, datasets, and transformers in the training "
@@ -129,23 +186,8 @@ def train(args: argparse.Namespace) -> None:
         max_seq_length=args.max_seq_length,
         load_in_4bit=True,
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=args.lora_r,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-        lora_alpha=args.lora_alpha,
-        use_gradient_checkpointing="unsloth",
-    )
+    configure_special_tokens(model, tokenizer)
+    model = ensure_peft_model(model, FastLanguageModel, args)
     prompts = [
         {
             "prompt": [
@@ -174,6 +216,8 @@ def train(args: argparse.Namespace) -> None:
         logging_steps=1,
         max_steps=args.max_steps,
         learning_rate=args.learning_rate,
+        fp16=args.fp16,
+        bf16=args.bf16,
         report_to=args.report_to,
         run_name=args.run_name,
         push_to_hub=args.push_to_hub,
@@ -212,6 +256,8 @@ def main() -> None:
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--report-to", default=os.getenv("REPORT_TO", "none"))
     parser.add_argument("--run-name", default="incident-commander-grpo")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--bf16", action="store_true")
     args = parser.parse_args()
     if args.push_to_hub and not args.hub_model_id:
         raise SystemExit("--hub-model-id is required when --push-to-hub is set")
