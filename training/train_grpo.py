@@ -20,11 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from incident_commander_env.agent_config import DEFAULT_AGENT_MODEL_ID
+from incident_commander_env.judge import EnsembleJudge
 from incident_commander_env.models import AgentRole, IncidentAction
 from incident_commander_env.scenarios import IncidentScenario, generate_scenario
 from incident_commander_env.server.incident_environment import IncidentCommanderEnvironment
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+DEFAULT_MODEL = DEFAULT_AGENT_MODEL_ID
 DEFAULT_OUTPUT = ROOT / "outputs" / "grpo_incident_commander"
 VALID_TOOL_NAMES = {
     "list_tools",
@@ -35,6 +37,7 @@ VALID_TOOL_NAMES = {
     "deploy_fix",
     "send_update",
     "finish_incident",
+    "judge_response",
 }
 TOOL_ALIASES = {
     "check_metric": "check_metrics",
@@ -65,6 +68,7 @@ DEFAULT_ROLE_BY_TOOL = {
     "deploy_fix": AgentRole.REMEDIATOR.value,
     "send_update": AgentRole.COMMUNICATOR.value,
     "finish_incident": AgentRole.COMMUNICATOR.value,
+    "judge_response": AgentRole.JUDGE.value,
 }
 ROLE_ALIASES = {
     "monitoring": AgentRole.MONITOR.value,
@@ -79,7 +83,9 @@ ROLE_ALIASES = {
     "shared_notebook": "",
     "shared_pad": "",
     "scratchpad": "",
+    "judge": AgentRole.JUDGE.value,
 }
+JUDGE = EnsembleJudge()
 _DEBUG_REWARD_COUNT = 0
 
 SYSTEM_PROMPT = """You are an incident-response policy.
@@ -345,6 +351,14 @@ def rollout_completion(
         if obs.done:
             break
     reward += obs.rubric_scores.total
+    judge_evaluation = JUDGE.evaluate(
+        candidate=[action.model_dump(mode="json") for action in actions],
+        scenario=env.scenario,
+        actions=actions,
+    )
+    if judge_evaluation.integrity_penalty <= -100:
+        return -100.0
+    reward += judge_evaluation.reward_delta
     return reward
 
 

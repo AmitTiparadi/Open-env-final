@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+from incident_commander_env.agent_config import DEFAULT_AGENT_MODEL_ID
+
+DEFAULT_MODEL = DEFAULT_AGENT_MODEL_ID
 DEFAULT_DATA = ROOT / "data" / "sft_trajectories.jsonl"
 DEFAULT_OUTPUT = ROOT / "outputs" / "sft_incident_commander"
 

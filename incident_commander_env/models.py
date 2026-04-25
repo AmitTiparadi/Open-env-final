@@ -15,6 +15,7 @@ class AgentRole(str, Enum):
     INVESTIGATOR = "investigator"
     REMEDIATOR = "remediator"
     COMMUNICATOR = "communicator"
+    JUDGE = "judge"
 
 
 class IncidentAction(Action):
@@ -48,6 +49,8 @@ class RubricBreakdown(BaseModel):
     speed_bonus: float = 0.0
     hallucination_penalty: float = 0.0
     process_reward: float = 0.0
+    judge_score: float = 0.0
+    integrity_penalty: float = 0.0
     total: float = 0.0
 
 
@@ -78,5 +81,7 @@ class IncidentState(State):
     secondary_outage: bool = False
     status_updates_sent: int = 0
     hallucination_detected: bool = False
+    integrity_violation_detected: bool = False
     shared_note_count: int = 0
+    judge_evaluations: int = 0
     last_actor: Optional[AgentRole] = None

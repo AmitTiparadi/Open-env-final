@@ -138,6 +138,23 @@ class IncidentCommanderMCPEnvironment(MCPEnvironment):  # type: ignore[misc]
                 arguments={"summary": summary},
             )
 
+        @mcp.tool
+        def judge_response(
+            agent_role: str,
+            candidate_response: str,
+            ensemble_size: int = 10,
+        ) -> dict[str, Any]:
+            """Judge a candidate response part-by-part with verifier guardrails."""
+
+            return self._call_core(
+                "judge_response",
+                agent_role=agent_role,
+                arguments={
+                    "candidate_response": candidate_response,
+                    "ensemble_size": ensemble_size,
+                },
+            )
+
         super().__init__(mcp)
 
     def reset(

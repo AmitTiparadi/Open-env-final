@@ -48,9 +48,15 @@ can produce verifiable rewards for RL post-training.
 - Investigator: queries logs and submits evidence-backed root causes.
 - Remediator: deploys targeted fixes and must avoid secondary outages.
 - Communicator: sends concise, accurate stakeholder updates.
+- Judge: evaluates candidate responses part-by-part with an LLM-as-a-Judge ensemble and hard verifier guardrails.
 
 Agents share a scratchpad, but private tool outputs are scoped to the role that
 called the tool. This creates partial observability and forces coordination.
+
+Operational agents default to `Qwen/Qwen3.5-9B`. The judge defaults to
+`google/gemma-4-31B-it` with `10` judge calls per evaluation. Override these
+with `INCIDENT_AGENT_MODEL_ID`, `INCIDENT_JUDGE_MODEL_ID`, and
+`INCIDENT_JUDGE_ENSEMBLE_SIZE`.
 
 ## Incident Scenarios
 
@@ -82,9 +88,19 @@ The reward is composable and aligned with the hackathon judging guidance:
 | Accurate stakeholder update | `+0.2` |
 | Time-to-resolution bonus | up to `+0.1` |
 | Hallucinated evidence or false root cause | `-0.3` |
+| Judge per-part shaping | bounded `+0.25` |
+| Hard integrity / reward-hacking violation | `-100` |
 
 The environment also emits smaller process rewards for useful evidence-gathering
 and scratchpad notes. This helps early RL rollouts avoid all-zero rewards.
+
+The judge is deliberately not the only source of truth. It scores root cause,
+fix safety, stakeholder update, evidence process, and sequence completeness as
+separate parts, so one mistake does not erase all useful work. Reward-hacking
+patterns such as trying to delete timers, override rewards, patch environment
+state, hide logs, or bypass verifiers are caught by deterministic guardrails
+before judge scores are applied. Those hard integrity violations receive `-100`
+even if the LLM judge would otherwise rate the response well.
 
 ## OpenEnv / MCP Interface
 
@@ -106,6 +122,7 @@ Main tools:
 - `deploy_fix`
 - `send_update`
 - `finish_incident`
+- `judge_response`
 - `list_incident_tools`
 
 ## Running The Space
@@ -337,6 +354,8 @@ For the final submission, include:
 
 ```text
 incident_commander_env/
+  agent_config.py
+  judge.py
   models.py
   scenarios.py
   rewards.py

@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import uuid4
 
+from incident_commander_env.agent_config import (
+    AGENT_MODEL_BY_ROLE,
+    DEFAULT_JUDGE_ENSEMBLE_SIZE,
+)
 from incident_commander_env.compat import OpenEnvEnvironment
+from incident_commander_env.judge import EnsembleJudge, parse_candidate_actions
 from incident_commander_env.models import (
     AgentRole,
     IncidentAction,
@@ -32,6 +37,14 @@ from incident_commander_env.scenarios import (
 )
 
 
+INCIDENT_RESPONSE_ROLES = [
+    AgentRole.MONITOR,
+    AgentRole.INVESTIGATOR,
+    AgentRole.REMEDIATOR,
+    AgentRole.COMMUNICATOR,
+]
+
+
 class IncidentCommanderEnvironment(
     OpenEnvEnvironment[IncidentAction, IncidentObservation, IncidentState]
 ):
@@ -52,6 +65,8 @@ class IncidentCommanderEnvironment(
         }
         self.status_update_scores: list[float] = []
         self.status_update_reasons: list[list[str]] = []
+        self.judge = EnsembleJudge()
+        self.judge_evaluations: list[dict[str, Any]] = []
         self.tool_history: list[dict[str, Any]] = []
         self.max_turns = 14
 
@@ -83,6 +98,7 @@ class IncidentCommanderEnvironment(
         self.private_transcripts = {role: [] for role in AgentRole}
         self.status_update_scores = []
         self.status_update_reasons = []
+        self.judge_evaluations = []
         self.tool_history = []
         self._state = IncidentState(
             episode_id=episode_id or str(uuid4()),
@@ -97,7 +113,9 @@ class IncidentCommanderEnvironment(
             secondary_outage=False,
             status_updates_sent=0,
             hallucination_detected=False,
+            integrity_violation_detected=False,
             shared_note_count=0,
+            judge_evaluations=0,
             last_actor=None,
         )
         return self._observation(
@@ -137,6 +155,7 @@ class IncidentCommanderEnvironment(
             "deploy_fix": self._tool_deploy_fix,
             "send_update": self._tool_send_update,
             "finish_incident": self._tool_finish_incident,
+            "judge_response": self._tool_judge_response,
         }.get(action.tool_name)
 
         if handler is None:
@@ -206,7 +225,7 @@ class IncidentCommanderEnvironment(
             ToolSpec(
                 name="share_note",
                 description="Publish evidence or a hypothesis to the shared scratchpad.",
-                allowed_roles=list(AgentRole),
+                allowed_roles=INCIDENT_RESPONSE_ROLES,
                 input_schema={"note": "short evidence-backed note"},
             ),
             ToolSpec(
@@ -236,6 +255,18 @@ class IncidentCommanderEnvironment(
                 description="End the episode after fix and communication are complete.",
                 allowed_roles=[AgentRole.REMEDIATOR, AgentRole.COMMUNICATOR],
                 input_schema={"summary": "final incident summary"},
+            ),
+            ToolSpec(
+                name="judge_response",
+                description=(
+                    "Evaluate a candidate incident response with a 10-call "
+                    "LLM-as-a-Judge ensemble and hard anti-reward-hacking checks."
+                ),
+                allowed_roles=[AgentRole.JUDGE],
+                input_schema={
+                    "candidate_response": "JSON tool-call list or natural-language response",
+                    "ensemble_size": "optional judge calls, defaults to 10",
+                },
             ),
         ]
 
@@ -410,6 +441,38 @@ class IncidentCommanderEnvironment(
             tool_result={"speed_bonus": max(0.0, done_reward)},
         )
 
+    def _tool_judge_response(self, action: IncidentAction) -> IncidentObservation:
+        candidate = action.arguments.get("candidate_response")
+        if candidate is None:
+            candidate = action.arguments.get("response") or action.arguments.get("output") or []
+        ensemble_size = int(action.arguments.get("ensemble_size") or DEFAULT_JUDGE_ENSEMBLE_SIZE)
+        parsed_actions = parse_candidate_actions(candidate)
+        evaluation = self.judge.evaluate(
+            candidate=candidate,
+            scenario=self.scenario,
+            actions=parsed_actions,
+            ensemble_size=ensemble_size,
+        )
+        dumped = evaluation.model_dump(mode="json")
+        self.judge_evaluations.append(dumped)
+        self._state.judge_evaluations = len(self.judge_evaluations)
+        if evaluation.integrity_penalty <= -100:
+            self._state.integrity_violation_detected = True
+            reward = -100.0
+            message = "Judge detected a hard integrity violation."
+        else:
+            reward = evaluation.reward_delta
+            message = "Judge completed ensemble evaluation."
+        return self._observation(
+            message=message,
+            reward=reward,
+            role=action.agent_role,
+            tool_result={
+                **dumped,
+                "parsed_action_count": len(parsed_actions),
+            },
+        )
+
     def _observation(
         self,
         message: str,
@@ -439,6 +502,8 @@ class IncidentCommanderEnvironment(
                 "affected_service": self.scenario.affected_service,
                 "scenario_ids": scenario_ids(),
                 "tool_history": self.tool_history[-5:],
+                "agent_models": AGENT_MODEL_BY_ROLE,
+                "judge_ensemble_size": DEFAULT_JUDGE_ENSEMBLE_SIZE,
             },
         )
 
@@ -452,13 +517,18 @@ class IncidentCommanderEnvironment(
             fix = 0.0
         update = max(self.status_update_scores) if self.status_update_scores else 0.0
         hallucination = -0.3 if self._state.hallucination_detected else 0.0
+        integrity = -100.0 if self._state.integrity_violation_detected else 0.0
+        judge_score = max(
+            (float(item.get("reward_delta", 0.0)) for item in self.judge_evaluations),
+            default=0.0,
+        )
         speed = speed_bonus(
             self._state.step_count,
             self.max_turns,
             self._state.resolved and not self._state.secondary_outage,
         )
         process = best_evidence_overlap(self.shared_notes, self.scenario) + process_reward
-        total = root + fix + update + speed + hallucination
+        total = root + fix + update + speed + hallucination + judge_score + integrity
         return RubricBreakdown(
             root_cause=round(root, 4),
             fix_safety=round(fix, 4),
@@ -466,6 +536,8 @@ class IncidentCommanderEnvironment(
             speed_bonus=round(speed, 4),
             hallucination_penalty=round(hallucination, 4),
             process_reward=round(process, 4),
+            judge_score=round(judge_score, 4),
+            integrity_penalty=round(integrity, 4),
             total=round(total, 4),
         )
 
