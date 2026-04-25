@@ -16,9 +16,12 @@ from incident_commander_env.demo_agents import run_scripted_response
 from incident_commander_env.scenarios import SCENARIOS, IncidentScenario
 
 
-SYSTEM_PROMPT = """You are an incident-response policy.
+SYSTEM_PROMPT = """/no_think
+You are an incident-response policy.
 Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
 and arguments. Use only evidence from tool outputs and shared notes.
+Return JSON only. Do not reveal thinking, analysis, explanations, markdown, or
+`</think>`.
 """
 
 
@@ -188,9 +191,10 @@ def make_sft_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for scenario in SCENARIOS:
         prompt = (
-            f"Incident started. Visible alerts: {' | '.join(scenario.alerts)}. "
+            f"/no_think\nIncident started. Visible alerts: {' | '.join(scenario.alerts)}. "
             f"Coordinate the monitor, investigator, remediator, and communicator. "
-            "Return a JSON list of tool calls for the episode."
+            "Return a JSON list of tool calls for the episode. Start with `[` and "
+            "stop after the closing `]`."
         )
         rows.append(
             {

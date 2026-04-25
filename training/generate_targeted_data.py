@@ -33,7 +33,8 @@ from training.prepare_data import (
 
 TARGETED_SYSTEM_PROMPT = (
     SYSTEM_PROMPT.strip()
-    + "\nReturn compact JSON only. Use 6 to 9 calls. Stop after finish_incident."
+    + "\n/no_think\nReturn compact JSON only. Use 6 to 9 calls. "
+    "Stop after finish_incident. Do not reveal thinking or `</think>`."
 )
 
 
@@ -51,10 +52,11 @@ def action(tool_name: str, role: AgentRole, arguments: dict[str, Any]) -> dict[s
 
 def scenario_prompt(scenario: IncidentScenario, focus: str) -> str:
     return (
-        f"Incident: {scenario.title}. Focus: {focus}. "
+        f"/no_think\nIncident: {scenario.title}. Focus: {focus}. "
         f"Affected service: {scenario.affected_service}. "
         f"Alerts: {' | '.join(scenario.alerts)}. "
-        "Return compact JSON tool calls only."
+        "Return compact JSON tool calls only. First character must be `[`; "
+        "last character must be `]`."
     )
 
 

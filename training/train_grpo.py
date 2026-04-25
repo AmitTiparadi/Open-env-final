@@ -106,7 +106,8 @@ ROLE_ALIASES = {
 JUDGE = EnsembleJudge()
 _DEBUG_REWARD_COUNT = 0
 
-SYSTEM_PROMPT = """You are an incident-response policy.
+SYSTEM_PROMPT = """/no_think
+You are an incident-response policy.
 Return one compact JSON list of tool calls and then stop. Each call must contain
 tool_name, agent_role, and arguments. Use only evidence from tool outputs and
 shared notes.
@@ -118,14 +119,15 @@ The environment may include plausible red herrings and downstream cascading
 symptoms. Cross-validate logs, metrics, and APIs before naming the causal
 origin. Communicate only facts established by the team.
 Use 6 to 9 tool calls. The final tool call should be finish_incident. Return
-JSON only. Do not use markdown fences, comments, explanations, or repeated
-plans.
+JSON only. Do not reveal thinking, analysis, comments, markdown fences,
+explanations, or repeated plans.
 """
 
 
 def render_prompt(scenario: IncidentScenario) -> list[dict[str, str]]:
     alerts = "\n".join(f"- {alert}" for alert in scenario.alerts)
-    user_prompt = f"""Incident started.
+    user_prompt = f"""/no_think
+Incident started.
 Scenario id: {scenario.scenario_id}
 Difficulty: {scenario.difficulty}
 Affected service: {scenario.affected_service}
@@ -137,6 +139,8 @@ check_metrics, query_logs, optional query_api/web_search/python_exec,
 share_note, submit_root_cause, deploy_fix, send_update, finish_incident.
 
 Do not invent tools. Do not use shared/shared-notebook as a role.
+Do not write "Thinking Process", "The user wants", "Let me", analysis text, or
+`</think>`. The first character must be `[` and the last character must be `]`.
 End the answer immediately after the closing JSON bracket.
 """
     return [
@@ -363,6 +367,17 @@ def completion_quality_reward(completion: Any, actions: list[IncidentAction]) ->
         reward -= 0.04
     if "```" in text or "here is" in text_lower or "i will" in text_lower:
         reward -= 0.05
+    thinking_markers = (
+        "thinking process",
+        "</think>",
+        "<think>",
+        "the user wants",
+        "let me",
+        "i need to",
+        "analyze the request",
+    )
+    if any(marker in text_lower for marker in thinking_markers):
+        reward -= 0.35
     if actions:
         if actions[-1].tool_name == "finish_incident":
             reward += 0.04
