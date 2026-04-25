@@ -1,0 +1,6 @@
+openenv-gpu/
+outputs/
+__pycache__/
+*.pyc
+.git/
+.venv/
