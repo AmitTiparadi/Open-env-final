@@ -21,9 +21,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from incident_commander_env.agent_config import DEFAULT_AGENT_MODEL_ID
+from incident_commander_env.interactive_rl import AdaptiveTaskGenerator
 from incident_commander_env.judge import EnsembleJudge
 from incident_commander_env.models import AgentRole, IncidentAction
-from incident_commander_env.scenarios import IncidentScenario, generate_scenario
+from incident_commander_env.rewards import (
+    EVALUATION_INTEGRITY_PENALTY,
+    TRAINING_INTEGRITY_PENALTY,
+)
+from incident_commander_env.scenarios import IncidentScenario, get_scenario
 from incident_commander_env.server.incident_environment import IncidentCommanderEnvironment
 
 DEFAULT_MODEL = DEFAULT_AGENT_MODEL_ID
@@ -38,6 +43,9 @@ VALID_TOOL_NAMES = {
     "send_update",
     "finish_incident",
     "judge_response",
+    "python_exec",
+    "web_search",
+    "query_api",
 }
 TOOL_ALIASES = {
     "check_metric": "check_metrics",
@@ -58,6 +66,13 @@ TOOL_ALIASES = {
     "communicate": "send_update",
     "finish": "finish_incident",
     "close": "finish_incident",
+    "python": "python_exec",
+    "execute_python": "python_exec",
+    "code": "python_exec",
+    "search": "web_search",
+    "web": "web_search",
+    "api": "query_api",
+    "query": "query_api",
 }
 DEFAULT_ROLE_BY_TOOL = {
     "list_tools": AgentRole.MONITOR.value,
@@ -69,6 +84,9 @@ DEFAULT_ROLE_BY_TOOL = {
     "send_update": AgentRole.COMMUNICATOR.value,
     "finish_incident": AgentRole.COMMUNICATOR.value,
     "judge_response": AgentRole.JUDGE.value,
+    "python_exec": AgentRole.INVESTIGATOR.value,
+    "web_search": AgentRole.INVESTIGATOR.value,
+    "query_api": AgentRole.INVESTIGATOR.value,
 }
 ROLE_ALIASES = {
     "monitoring": AgentRole.MONITOR.value,
@@ -92,8 +110,9 @@ SYSTEM_PROMPT = """You are an incident-response policy.
 Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
 and arguments. Use only evidence from tool outputs and shared notes.
 Use exact roles only: monitor, investigator, remediator, communicator.
-Use exact tool names only: check_metrics, query_logs, share_note,
-submit_root_cause, deploy_fix, send_update, finish_incident.
+Use exact tool names only: check_metrics, query_logs, web_search, query_api,
+python_exec, share_note, submit_root_cause, deploy_fix, send_update,
+finish_incident.
 Return JSON only. Do not use markdown fences or comments.
 """
 
@@ -107,9 +126,13 @@ Affected service: {scenario.affected_service}
 Visible alerts:
 {alerts}
 
-Produce a complete incident-response JSON list with this exact schema:
+Produce a complete incident-response JSON list. You may use web_search,
+query_api, or python_exec when useful, but every claim must be backed by
+observations or tool evidence. Use this exact core schema:
 [{{"tool_name":"check_metrics","agent_role":"monitor","arguments":{{"service":"{scenario.affected_service}"}}}},
  {{"tool_name":"query_logs","agent_role":"investigator","arguments":{{"service":"{scenario.affected_service}"}}}},
+ {{"tool_name":"web_search","agent_role":"investigator","arguments":{{"query":"{scenario.affected_service}"}}}},
+ {{"tool_name":"query_api","agent_role":"investigator","arguments":{{"endpoint":"deployments"}}}},
  {{"tool_name":"share_note","agent_role":"investigator","arguments":{{"note":"evidence-backed note"}}}},
  {{"tool_name":"submit_root_cause","agent_role":"investigator","arguments":{{"root_cause":"...","evidence":"..."}}}},
  {{"tool_name":"deploy_fix","agent_role":"remediator","arguments":{{"fix_id":"..."}}}},
@@ -279,6 +302,12 @@ def normalize_action_item(item: Any) -> dict[str, Any] | None:
         )
     if normalized_tool_name == "finish_incident" and "summary" not in arguments:
         arguments["summary"] = arguments.get("message") or arguments.get("text") or ""
+    if normalized_tool_name == "python_exec" and "code" not in arguments:
+        arguments["code"] = arguments.get("text") or arguments.get("expression") or ""
+    if normalized_tool_name == "web_search" and "query" not in arguments:
+        arguments["query"] = arguments.get("text") or arguments.get("q") or ""
+    if normalized_tool_name == "query_api" and "endpoint" not in arguments:
+        arguments["endpoint"] = arguments.get("path") or arguments.get("url") or arguments.get("text") or ""
 
     normalized = {
         "tool_name": normalized_tool_name,
@@ -302,9 +331,9 @@ def parse_actions(completion: Any) -> list[IncidentAction]:
                 actions.append(IncidentAction.model_validate(normalized))
             except Exception:
                 continue
-            if len(actions) >= 8:
+            if len(actions) >= 12:
                 return actions
-    return actions[:8]
+    return actions[:12]
 
 
 def format_fallback_reward(completion: Any) -> float:
@@ -340,7 +369,7 @@ def rollout_completion(
     if "submit_root_cause" in tool_names:
         root_cause_index = tool_names.index("submit_root_cause")
         prior_tools = set(tool_names[:root_cause_index])
-        if prior_tools & {"check_metrics", "query_logs", "share_note"}:
+        if prior_tools & {"check_metrics", "query_logs", "share_note", "web_search", "query_api"}:
             reward += 0.04
     if {"deploy_fix", "send_update", "finish_incident"}.issubset(set(tool_names)):
         reward += 0.03
@@ -356,8 +385,8 @@ def rollout_completion(
         scenario=env.scenario,
         actions=actions,
     )
-    if judge_evaluation.integrity_penalty <= -100:
-        return -100.0
+    if judge_evaluation.integrity_penalty <= EVALUATION_INTEGRITY_PENALTY:
+        return TRAINING_INTEGRITY_PENALTY
     reward += judge_evaluation.reward_delta
     return reward
 
@@ -631,8 +660,10 @@ def train(args: argparse.Namespace) -> None:
     if args.debug_reward_samples:
         os.environ["GRPO_DEBUG_REWARD_SAMPLES"] = str(args.debug_reward_samples)
     prompts = []
+    task_generator = AdaptiveTaskGenerator(include_hidden=False, max_turns=14)
     for i in range(args.num_prompts):
-        scenario = generate_scenario(seed=i, difficulty=args.difficulty)
+        task = task_generator.sample(seed=i, difficulty=args.difficulty)
+        scenario = get_scenario(task.scenario_id)
         prompts.append(
             {
                 "prompt": render_prompt(scenario),

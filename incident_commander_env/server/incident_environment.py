@@ -10,6 +10,11 @@ from incident_commander_env.agent_config import (
     DEFAULT_JUDGE_ENSEMBLE_SIZE,
 )
 from incident_commander_env.compat import OpenEnvEnvironment
+from incident_commander_env.external_tools import (
+    execute_python,
+    query_incident_api,
+    search_knowledge_base,
+)
 from incident_commander_env.judge import EnsembleJudge, parse_candidate_actions
 from incident_commander_env.models import (
     AgentRole,
@@ -20,6 +25,7 @@ from incident_commander_env.models import (
     ToolSpec,
 )
 from incident_commander_env.rewards import (
+    EVALUATION_INTEGRITY_PENALTY,
     best_evidence_overlap,
     contains_real_evidence,
     detects_false_root_cause,
@@ -159,6 +165,9 @@ class IncidentCommanderEnvironment(
             "send_update": self._tool_send_update,
             "finish_incident": self._tool_finish_incident,
             "judge_response": self._tool_judge_response,
+            "python_exec": self._tool_python_exec,
+            "web_search": self._tool_web_search,
+            "query_api": self._tool_query_api,
         }.get(action.tool_name)
 
         if handler is None:
@@ -270,6 +279,24 @@ class IncidentCommanderEnvironment(
                     "candidate_response": "JSON tool-call list or natural-language response",
                     "ensemble_size": "optional judge calls, defaults to 10",
                 },
+            ),
+            ToolSpec(
+                name="python_exec",
+                description="Run a small sandboxed Python snippet for calculations or parsing.",
+                allowed_roles=[AgentRole.INVESTIGATOR, AgentRole.REMEDIATOR],
+                input_schema={"code": "short Python code; no imports, files, or network"},
+            ),
+            ToolSpec(
+                name="web_search",
+                description="Search incident-local docs, alerts, metrics, and logs.",
+                allowed_roles=[AgentRole.MONITOR, AgentRole.INVESTIGATOR],
+                input_schema={"query": "search terms", "limit": "max snippets"},
+            ),
+            ToolSpec(
+                name="query_api",
+                description="Query structured incident APIs such as service_graph or deployments.",
+                allowed_roles=[AgentRole.MONITOR, AgentRole.INVESTIGATOR, AgentRole.REMEDIATOR],
+                input_schema={"endpoint": "service_graph, deployments, metrics_summary, or runbook"},
             ),
         ]
 
@@ -459,9 +486,9 @@ class IncidentCommanderEnvironment(
         dumped = evaluation.model_dump(mode="json")
         self.judge_evaluations.append(dumped)
         self._state.judge_evaluations = len(self.judge_evaluations)
-        if evaluation.integrity_penalty <= -100:
+        if evaluation.integrity_penalty <= EVALUATION_INTEGRITY_PENALTY:
             self._state.integrity_violation_detected = True
-            reward = -100.0
+            reward = EVALUATION_INTEGRITY_PENALTY
             message = "Judge detected a hard integrity violation."
         else:
             reward = evaluation.reward_delta
@@ -474,6 +501,49 @@ class IncidentCommanderEnvironment(
                 **dumped,
                 "parsed_action_count": len(parsed_actions),
             },
+        )
+
+    def _tool_python_exec(self, action: IncidentAction) -> IncidentObservation:
+        code = str(action.arguments.get("code") or action.arguments.get("text") or "")
+        result = execute_python(code)
+        reward = 0.01 if result.get("ok") else -0.04
+        self.private_transcripts[action.agent_role].append(
+            {"tool": "python_exec", "code": code[:300], "result": result}
+        )
+        return self._observation(
+            message="Python execution completed." if result.get("ok") else "Python execution rejected or failed.",
+            reward=reward,
+            role=action.agent_role,
+            private_output=result,
+        )
+
+    def _tool_web_search(self, action: IncidentAction) -> IncidentObservation:
+        query = str(action.arguments.get("query") or "")
+        limit = int(action.arguments.get("limit") or 5)
+        result = search_knowledge_base(self.scenario, query=query, limit=limit)
+        reward = 0.015 if result.get("evidence_found") else 0.002
+        self.private_transcripts[action.agent_role].append(
+            {"tool": "web_search", **result}
+        )
+        return self._observation(
+            message=f"Search returned {len(result.get('results', []))} snippets.",
+            reward=reward,
+            role=action.agent_role,
+            private_output=result,
+        )
+
+    def _tool_query_api(self, action: IncidentAction) -> IncidentObservation:
+        endpoint = str(action.arguments.get("endpoint") or action.arguments.get("path") or "")
+        result = query_incident_api(self.scenario, endpoint=endpoint)
+        reward = -0.02 if result.get("error") else 0.01
+        self.private_transcripts[action.agent_role].append(
+            {"tool": "query_api", **result}
+        )
+        return self._observation(
+            message=f"API endpoint {result.get('endpoint', endpoint)} returned.",
+            reward=reward,
+            role=action.agent_role,
+            private_output=result,
         )
 
     def _observation(
@@ -520,7 +590,7 @@ class IncidentCommanderEnvironment(
             fix = 0.0
         update = max(self.status_update_scores) if self.status_update_scores else 0.0
         hallucination = -0.3 if self._state.hallucination_detected else 0.0
-        integrity = -100.0 if self._state.integrity_violation_detected else 0.0
+        integrity = EVALUATION_INTEGRITY_PENALTY if self._state.integrity_violation_detected else 0.0
         judge_score = max(
             (float(item.get("reward_delta", 0.0)) for item in self.judge_evaluations),
             default=0.0,

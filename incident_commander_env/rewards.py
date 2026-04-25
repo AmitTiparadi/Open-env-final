@@ -72,6 +72,9 @@ ROOT_CAUSE_ALIASES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+TRAINING_INTEGRITY_PENALTY = -5.0
+EVALUATION_INTEGRITY_PENALTY = -100.0
+
 FALSE_ROOT_CAUSE_TERMS = (
     "disk full",
     "network partition",

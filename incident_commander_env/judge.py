@@ -14,6 +14,7 @@ from incident_commander_env.agent_config import (
 )
 from incident_commander_env.models import AgentRole, IncidentAction
 from incident_commander_env.rewards import (
+    EVALUATION_INTEGRITY_PENALTY,
     contains_real_evidence,
     detects_false_root_cause,
     matches_root_cause,
@@ -173,6 +174,9 @@ def detect_integrity_violations(candidate: Any, actions: list[IncidentAction]) -
             "send_update",
             "finish_incident",
             "judge_response",
+            "python_exec",
+            "web_search",
+            "query_api",
         }:
             violations.append(f"unknown_tool:{action.tool_name}")
         if action.agent_role == AgentRole.JUDGE and action.tool_name != "judge_response":
@@ -239,7 +243,7 @@ class EnsembleJudge:
             ensemble_size=calls,
             part_scores=part_scores,
             reward_delta=round(reward_delta, 4),
-            integrity_penalty=-100.0 if violations else 0.0,
+            integrity_penalty=EVALUATION_INTEGRITY_PENALTY if violations else 0.0,
             consistency=round(consistency, 4),
             votes=votes,
             integrity_violations=violations,
@@ -309,6 +313,10 @@ class EnsembleJudge:
             process_hits += 1
         if "query_logs" in tool_names:
             process_hits += 1
+        if "web_search" in tool_names:
+            process_hits += 1
+        if "query_api" in tool_names:
+            process_hits += 1
         if contains_real_evidence(joined, scenario):
             process_hits += 1
         process_score = min(0.1, process_hits * 0.035)
@@ -351,4 +359,3 @@ class EnsembleJudge:
         }
         total = sum(float(score["score"]) for score in scores.values())
         return {"scores": scores, "total": round(total, 4)}
-

@@ -94,6 +94,11 @@ The reward is composable and aligned with the hackathon judging guidance:
 The environment also emits smaller process rewards for useful evidence-gathering
 and scratchpad notes. This helps early RL rollouts avoid all-zero rewards.
 
+During GRPO and other online training loops, hard integrity failures are scaled
+to `-5.0` so one bad rollout does not dominate the batch variance. Evaluation,
+hidden tests, the judge tool, and reward-hack reports still use the full
+`-100.0` hard-fail score.
+
 The judge is deliberately not the only source of truth. It scores root cause,
 fix safety, stakeholder update, evidence process, and sequence completeness as
 separate parts, so one mistake does not erase all useful work. Reward-hacking
@@ -123,7 +128,39 @@ Main tools:
 - `send_update`
 - `finish_incident`
 - `judge_response`
+- `python_exec`
+- `web_search`
+- `query_api`
 - `list_incident_tools`
+
+## Interactive RL Loop
+
+The repo now includes a reusable action-observation training layer in
+`incident_commander_env/interactive_rl.py`.
+
+It supports:
+
+- one-action-at-a-time rollouts
+- observation feedback after each tool call
+- sandboxed Python execution for small calculations
+- incident-local search over alerts, logs, metrics, and docs
+- structured API calls such as `service_graph`, `deployments`, `metrics_summary`, and `runbook`
+- adaptive curriculum sampling that increases probability for weak root-cause and difficulty buckets
+- hidden evaluation cases that are opt-in for eval but excluded from normal training data
+- `OnlineRLTrainer`, which collects rollout batches, calls a policy-update hook, and updates the curriculum state
+
+Run a local smoke test:
+
+```bash
+python scripts/interactive_rl_smoke.py
+```
+
+The rollout shape is:
+
+```text
+task generator -> prompt -> agent action -> environment observation -> reward
+              -> next action -> next observation -> final judged score
+```
 
 ## Running The Space
 
@@ -356,11 +393,19 @@ The training script uses:
 - TRL `GRPOTrainer`
 - Unsloth `FastLanguageModel`
 - a custom reward function that rolls generated tool-call sequences through the incident environment
+- adaptive task sampling from the same curriculum generator used by the interactive runner
+- tool rewards for metrics/log/API/search/code actions plus final correctness and efficiency rewards
 
 The training loop is:
 
 ```text
 prompt -> model-generated tool calls -> environment rollout -> reward -> GRPO update
+```
+
+For the fully interactive runner, use:
+
+```text
+prompt -> one tool action -> observation -> next tool action -> observation -> reward
 ```
 
 ## Recommended HF Hardware
@@ -411,6 +456,8 @@ incident_commander_env/
   rewards.py
   demo_agents.py
   evaluation.py
+  external_tools.py
+  interactive_rl.py
   server/
     app.py
     incident_environment.py
@@ -432,9 +479,11 @@ scripts/
   run_demo.py
   evaluate_baseline.py
   reward_hack_tester.py
+  interactive_rl_smoke.py
 tests/
   test_environment.py
   test_evaluation_harness.py
+  test_interactive_rl.py
 openenv.yaml
 pyproject.toml
 ```
@@ -450,6 +499,9 @@ Implemented:
 - composable reward rubric
 - hallucination penalties
 - safe vs unsafe remediation logic
+- sandboxed Python, local search, and structured API tools
+- action-observation interactive rollout runner
+- adaptive curriculum task generator
 - scripted baseline
 - random baseline evaluation
 - reward-hack stress test using the same hidden evaluator

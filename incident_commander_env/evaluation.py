@@ -9,12 +9,15 @@ from pydantic import BaseModel, Field
 
 from incident_commander_env.judge import EnsembleJudge, parse_candidate_actions
 from incident_commander_env.models import AgentRole, IncidentAction
-from incident_commander_env.rewards import contains_real_evidence
+from incident_commander_env.rewards import (
+    EVALUATION_INTEGRITY_PENALTY,
+    contains_real_evidence,
+)
 from incident_commander_env.scenarios import is_hidden_scenario
 from incident_commander_env.server.incident_environment import IncidentCommanderEnvironment
 
 
-EVIDENCE_TOOLS = {"check_metrics", "query_logs", "share_note"}
+EVIDENCE_TOOLS = {"check_metrics", "query_logs", "share_note", "web_search", "query_api"}
 CORE_WORKFLOW = {
     "check_metrics",
     "query_logs",
@@ -177,15 +180,15 @@ def evaluate_candidate(
         scenario=env.scenario,
         actions=actions,
     )
-    if judge_evaluation.integrity_penalty <= -100:
+    if judge_evaluation.integrity_penalty <= EVALUATION_INTEGRITY_PENALTY:
         env.state.integrity_violation_detected = True
 
     checks = hidden_security_checks(actions, env)
     base_score = float(obs.rubric_scores.total)
     judge_score = float(judge_evaluation.reward_delta)
     security_penalty = float(checks["security_penalty"])
-    if judge_evaluation.integrity_penalty <= -100:
-        final_score = -100.0
+    if judge_evaluation.integrity_penalty <= EVALUATION_INTEGRITY_PENALTY:
+        final_score = EVALUATION_INTEGRITY_PENALTY
     else:
         final_score = base_score + judge_score + security_penalty
         if checks["unsupported_root_claim"] and env.state.resolved:
