@@ -369,6 +369,7 @@ Generate the reproducible datasets first:
 
 ```bash
 python training/prepare_data.py
+python training/generate_targeted_data.py --replace-main
 ```
 
 This creates:
@@ -376,6 +377,11 @@ This creates:
 - `data/pretrain_corpus.jsonl`
 - `data/sft_trajectories.jsonl`
 - `data/eval_scenarios.jsonl`
+
+The targeted generator expands the main pretrain and SFT files with
+scenario-specific rows for compact JSON termination, red-herring rejection,
+cascading-origin tracing, and communicator uncertainty. It also writes
+`data/targeted_data_report.json` plus targeted-only and augmented JSONL files.
 
 Run the 80/10/10 training stages:
 

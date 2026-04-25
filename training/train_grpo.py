@@ -107,8 +107,9 @@ JUDGE = EnsembleJudge()
 _DEBUG_REWARD_COUNT = 0
 
 SYSTEM_PROMPT = """You are an incident-response policy.
-Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
-and arguments. Use only evidence from tool outputs and shared notes.
+Return one compact JSON list of tool calls and then stop. Each call must contain
+tool_name, agent_role, and arguments. Use only evidence from tool outputs and
+shared notes.
 Use exact roles only: monitor, investigator, remediator, communicator.
 Use exact tool names only: check_metrics, query_logs, web_search, query_api,
 python_exec, share_note, submit_root_cause, deploy_fix, send_update,
@@ -116,7 +117,9 @@ finish_incident.
 The environment may include plausible red herrings and downstream cascading
 symptoms. Cross-validate logs, metrics, and APIs before naming the causal
 origin. Communicate only facts established by the team.
-Return JSON only. Do not use markdown fences or comments.
+Use 6 to 9 tool calls. The final tool call should be finish_incident. Return
+JSON only. Do not use markdown fences, comments, explanations, or repeated
+plans.
 """
 
 
@@ -129,21 +132,12 @@ Affected service: {scenario.affected_service}
 Visible alerts:
 {alerts}
 
-Produce a complete incident-response JSON list. You may use web_search,
-query_api, or python_exec when useful, but every claim must be backed by
-observations or tool evidence. Trace the causal origin rather than only the
-surface symptom, and avoid red herrings. Use this exact core schema:
-[{{"tool_name":"check_metrics","agent_role":"monitor","arguments":{{"service":"{scenario.affected_service}"}}}},
- {{"tool_name":"query_logs","agent_role":"investigator","arguments":{{"service":"{scenario.affected_service}"}}}},
- {{"tool_name":"web_search","agent_role":"investigator","arguments":{{"query":"{scenario.affected_service}"}}}},
- {{"tool_name":"query_api","agent_role":"investigator","arguments":{{"endpoint":"deployments"}}}},
- {{"tool_name":"share_note","agent_role":"investigator","arguments":{{"note":"evidence-backed note"}}}},
- {{"tool_name":"submit_root_cause","agent_role":"investigator","arguments":{{"root_cause":"...","evidence":"..."}}}},
- {{"tool_name":"deploy_fix","agent_role":"remediator","arguments":{{"fix_id":"..."}}}},
- {{"tool_name":"send_update","agent_role":"communicator","arguments":{{"message":"..."}}}},
- {{"tool_name":"finish_incident","agent_role":"communicator","arguments":{{"summary":"..."}}}}]
+Produce a complete compact JSON list with 6 to 9 calls:
+check_metrics, query_logs, optional query_api/web_search/python_exec,
+share_note, submit_root_cause, deploy_fix, send_update, finish_incident.
 
 Do not invent tools. Do not use shared/shared-notebook as a role.
+End the answer immediately after the closing JSON bracket.
 """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -355,6 +349,34 @@ def format_fallback_reward(completion: Any) -> float:
     return round(reward, 4)
 
 
+def completion_quality_reward(completion: Any, actions: list[IncidentAction]) -> float:
+    """Small shaping reward for concise, naturally terminated tool-call JSON."""
+
+    text = completion_to_text(completion).strip()
+    text_lower = text.lower()
+    reward = 0.0
+    if text.startswith("[") and text.endswith("]"):
+        reward += 0.08
+    elif text.startswith(("{", "[")) and text.endswith(("}", "]")):
+        reward += 0.035
+    else:
+        reward -= 0.04
+    if "```" in text or "here is" in text_lower or "i will" in text_lower:
+        reward -= 0.05
+    if actions:
+        if actions[-1].tool_name == "finish_incident":
+            reward += 0.04
+        elif any(action.tool_name == "finish_incident" for action in actions):
+            reward -= 0.04
+    if len(actions) > 9:
+        reward -= min(0.18, 0.03 * (len(actions) - 9))
+    if len(text) > 3000:
+        reward -= min(0.25, (len(text) - 3000) / 4000)
+    if actions and not any(action.tool_name == "finish_incident" for action in actions):
+        reward -= 0.04
+    return round(reward, 4)
+
+
 def rollout_completion(
     completion: Any,
     seed: int = 0,
@@ -369,7 +391,8 @@ def rollout_completion(
 
     tool_names = [action.tool_name for action in actions]
     valid_tool_count = sum(tool_name in VALID_TOOL_NAMES for tool_name in tool_names)
-    reward = min(0.05, 0.006 * valid_tool_count)
+    reward = completion_quality_reward(completion, actions)
+    reward += min(0.05, 0.006 * valid_tool_count)
     if "submit_root_cause" in tool_names:
         root_cause_index = tool_names.index("submit_root_cause")
         prior_tools = set(tool_names[:root_cause_index])

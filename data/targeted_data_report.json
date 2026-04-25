@@ -1,0 +1,15 @@
+{
+  "base_pretrain_rows": 12,
+  "targeted_pretrain_rows": 16,
+  "augmented_pretrain_rows": 28,
+  "base_sft_rows": 8,
+  "targeted_sft_rows": 16,
+  "augmented_sft_rows": 24,
+  "replace_main": true,
+  "targeted_behaviors": [
+    "compact_success",
+    "red_herring_rejection",
+    "cascading_origin_trace",
+    "communicator_uncertainty"
+  ]
+}
