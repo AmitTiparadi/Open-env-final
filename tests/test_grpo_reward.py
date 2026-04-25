@@ -49,6 +49,32 @@ def test_parse_actions_accepts_openenv_style_role_in_arguments() -> None:
     assert "agent_role" not in actions[0].arguments
 
 
+def test_parse_actions_repairs_shared_role_and_json_comments() -> None:
+    completion = """```json
+[
+  {
+    "tool_name": "check_metrics",
+    "agent_role": "shared",
+    "arguments": {
+      "service_name": "orders-api" // model sometimes comments inside JSON
+    }
+  },
+  {
+    "tool_name": "send_update",
+    "agent_role": "shared-notebook",
+    "arguments": {"update_title": "orders-api is degraded"}
+  }
+]
+```"""
+
+    actions = parse_actions(completion)
+
+    assert [action.tool_name for action in actions] == ["check_metrics", "send_update"]
+    assert [action.agent_role for action in actions] == ["monitor", "communicator"]
+    assert actions[0].arguments["service"] == "orders-api"
+    assert "orders-api" in actions[1].arguments["message"]
+
+
 def test_rollout_rewards_vary_for_format_quality() -> None:
     valid_completion = json.dumps(
         [

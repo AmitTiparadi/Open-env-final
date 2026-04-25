@@ -41,16 +41,30 @@ TOOL_ALIASES = {
     "metrics": "check_metrics",
     "logs": "query_logs",
     "query_log": "query_logs",
+    "inspect_agent": "query_logs",
     "note": "share_note",
     "share": "share_note",
+    "update_notes": "share_note",
+    "check_notes": "share_note",
     "root_cause": "submit_root_cause",
     "submit": "submit_root_cause",
     "fix": "deploy_fix",
     "deploy": "deploy_fix",
+    "trigger": "deploy_fix",
     "update": "send_update",
     "communicate": "send_update",
     "finish": "finish_incident",
     "close": "finish_incident",
+}
+DEFAULT_ROLE_BY_TOOL = {
+    "list_tools": AgentRole.MONITOR.value,
+    "check_metrics": AgentRole.MONITOR.value,
+    "query_logs": AgentRole.INVESTIGATOR.value,
+    "share_note": AgentRole.INVESTIGATOR.value,
+    "submit_root_cause": AgentRole.INVESTIGATOR.value,
+    "deploy_fix": AgentRole.REMEDIATOR.value,
+    "send_update": AgentRole.COMMUNICATOR.value,
+    "finish_incident": AgentRole.COMMUNICATOR.value,
 }
 ROLE_ALIASES = {
     "monitoring": AgentRole.MONITOR.value,
@@ -61,12 +75,20 @@ ROLE_ALIASES = {
     "remediator": AgentRole.REMEDIATOR.value,
     "communicate": AgentRole.COMMUNICATOR.value,
     "communicator": AgentRole.COMMUNICATOR.value,
+    "shared": "",
+    "shared_notebook": "",
+    "shared_pad": "",
+    "scratchpad": "",
 }
 _DEBUG_REWARD_COUNT = 0
 
 SYSTEM_PROMPT = """You are an incident-response policy.
 Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
 and arguments. Use only evidence from tool outputs and shared notes.
+Use exact roles only: monitor, investigator, remediator, communicator.
+Use exact tool names only: check_metrics, query_logs, share_note,
+submit_root_cause, deploy_fix, send_update, finish_incident.
+Return JSON only. Do not use markdown fences or comments.
 """
 
 
@@ -79,9 +101,16 @@ Affected service: {scenario.affected_service}
 Visible alerts:
 {alerts}
 
-Produce a complete incident-response JSON list. Prefer this order:
-check_metrics/query_logs, share_note, submit_root_cause, deploy_fix,
-send_update, finish_incident. Use only valid tool names and roles.
+Produce a complete incident-response JSON list with this exact schema:
+[{{"tool_name":"check_metrics","agent_role":"monitor","arguments":{{"service":"{scenario.affected_service}"}}}},
+ {{"tool_name":"query_logs","agent_role":"investigator","arguments":{{"service":"{scenario.affected_service}"}}}},
+ {{"tool_name":"share_note","agent_role":"investigator","arguments":{{"note":"evidence-backed note"}}}},
+ {{"tool_name":"submit_root_cause","agent_role":"investigator","arguments":{{"root_cause":"...","evidence":"..."}}}},
+ {{"tool_name":"deploy_fix","agent_role":"remediator","arguments":{{"fix_id":"..."}}}},
+ {{"tool_name":"send_update","agent_role":"communicator","arguments":{{"message":"..."}}}},
+ {{"tool_name":"finish_incident","agent_role":"communicator","arguments":{{"summary":"..."}}}}]
+
+Do not invent tools. Do not use shared/shared-notebook as a role.
 """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -119,7 +148,40 @@ def normalize_role(value: Any) -> str:
     return ROLE_ALIASES.get(role, role)
 
 
+def strip_json_comments(text: str) -> str:
+    result = []
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if escaped:
+            result.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and in_string:
+            result.append(char)
+            escaped = True
+            index += 1
+            continue
+        if char == '"':
+            in_string = not in_string
+            result.append(char)
+            index += 1
+            continue
+        if not in_string and char == "/" and next_char == "/":
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
 def json_values_from_text(text: str) -> list[Any]:
+    text = strip_json_comments(text)
     decoder = json.JSONDecoder()
     values = []
     index = 0
@@ -175,6 +237,7 @@ def normalize_action_item(item: Any) -> dict[str, Any] | None:
         arguments = {"value": arguments}
 
     tool_name = item.get("tool_name") or item.get("tool") or item.get("name")
+    normalized_tool_name = normalize_tool_name(tool_name)
     agent_role = (
         item.get("agent_role")
         or item.get("role")
@@ -183,9 +246,37 @@ def normalize_action_item(item: Any) -> dict[str, Any] | None:
         or arguments.pop("agent_role", None)
         or arguments.pop("role", None)
     )
+    normalized_role = normalize_role(agent_role)
+    if normalized_role not in {role.value for role in AgentRole}:
+        normalized_role = DEFAULT_ROLE_BY_TOOL.get(normalized_tool_name, normalized_role)
+
+    if "service" not in arguments:
+        for key in ("service_name", "service_id", "serviceName"):
+            if key in arguments:
+                arguments["service"] = arguments[key]
+                break
+    if normalized_tool_name == "share_note" and "note" not in arguments:
+        arguments["note"] = arguments.get("text") or arguments.get("message") or str(arguments)
+    if normalized_tool_name == "submit_root_cause":
+        if "root_cause" not in arguments:
+            arguments["root_cause"] = arguments.get("cause") or arguments.get("text") or ""
+        if "evidence" not in arguments:
+            arguments["evidence"] = arguments.get("text") or arguments.get("note") or ""
+    if normalized_tool_name == "deploy_fix" and "fix_id" not in arguments:
+        arguments["fix_id"] = arguments.get("fix") or arguments.get("id") or arguments.get("text") or ""
+    if normalized_tool_name == "send_update" and "message" not in arguments:
+        arguments["message"] = (
+            arguments.get("update")
+            or arguments.get("update_title")
+            or arguments.get("text")
+            or str(arguments)
+        )
+    if normalized_tool_name == "finish_incident" and "summary" not in arguments:
+        arguments["summary"] = arguments.get("message") or arguments.get("text") or ""
+
     normalized = {
-        "tool_name": normalize_tool_name(tool_name),
-        "agent_role": normalize_role(agent_role),
+        "tool_name": normalized_tool_name,
+        "agent_role": normalized_role,
         "arguments": arguments,
     }
     if not normalized["tool_name"] or not normalized["agent_role"]:
