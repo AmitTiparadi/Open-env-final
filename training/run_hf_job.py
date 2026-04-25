@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +42,18 @@ STAGE_TO_SCRIPT = {
 def run(command: list[str], cwd: Path) -> None:
     print("+ " + " ".join(command), flush=True)
     subprocess.run(command, cwd=str(cwd), check=True)
+
+
+def install_project(repo_path: Path, extras_target: str) -> None:
+    uv = shutil.which("uv")
+    if uv:
+        run(
+            [uv, "pip", "install", "--python", sys.executable, "-e", extras_target],
+            cwd=repo_path,
+        )
+        return
+    run([sys.executable, "-m", "ensurepip", "--upgrade"], cwd=repo_path)
+    run([sys.executable, "-m", "pip", "install", "-e", extras_target], cwd=repo_path)
 
 
 def main() -> None:
@@ -78,8 +91,7 @@ def main() -> None:
         f"Installing project {'with training extras' if not is_dry_run else 'without training extras'}...",
         flush=True,
     )
-    run([sys.executable, "-m", "pip", "install", "-U", "pip"], cwd=repo_path)
-    run([sys.executable, "-m", "pip", "install", "-e", extras_target], cwd=repo_path)
+    install_project(repo_path, extras_target)
 
     if args.stage != "prepare":
         data_path = repo_path / "data" / "pretrain_corpus.jsonl"
