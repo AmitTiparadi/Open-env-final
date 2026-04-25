@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from incident_commander_env.models import AgentRole, IncidentAction
+from incident_commander_env.scenarios import IncidentScenario, generate_scenario
 from incident_commander_env.server.incident_environment import IncidentCommanderEnvironment
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -30,6 +31,25 @@ SYSTEM_PROMPT = """You are an incident-response policy.
 Return a JSON list of tool calls. Each call must contain tool_name, agent_role,
 and arguments. Use only evidence from tool outputs and shared notes.
 """
+
+
+def render_prompt(scenario: IncidentScenario) -> list[dict[str, str]]:
+    alerts = "\n".join(f"- {alert}" for alert in scenario.alerts)
+    user_prompt = f"""Incident started.
+Scenario id: {scenario.scenario_id}
+Difficulty: {scenario.difficulty}
+Affected service: {scenario.affected_service}
+Visible alerts:
+{alerts}
+
+Produce a complete incident-response JSON list. Prefer this order:
+check_metrics/query_logs, share_note, submit_root_cause, deploy_fix,
+send_update, finish_incident. Use only valid tool names and roles.
+"""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
 
 def completion_to_text(completion: Any) -> str:
@@ -67,15 +87,28 @@ def parse_actions(completion: Any) -> list[IncidentAction]:
 
 
 def rollout_completion(
-    completion: str,
+    completion: Any,
     seed: int = 0,
     difficulty: str = "mixed",
     scenario_id: str | None = None,
 ) -> float:
     env = IncidentCommanderEnvironment()
     obs = env.reset(seed=seed, difficulty=difficulty, scenario_id=scenario_id)
-    reward = 0.0
-    for action in parse_actions(completion):
+    actions = parse_actions(completion)
+    if not actions:
+        return -0.05
+
+    tool_names = [action.tool_name for action in actions]
+    reward = min(0.04, 0.005 * len(actions))
+    if "submit_root_cause" in tool_names:
+        root_cause_index = tool_names.index("submit_root_cause")
+        prior_tools = set(tool_names[:root_cause_index])
+        if prior_tools & {"check_metrics", "query_logs", "share_note"}:
+            reward += 0.04
+    if {"deploy_fix", "send_update", "finish_incident"}.issubset(set(tool_names)):
+        reward += 0.03
+
+    for action in actions:
         obs = env.step(action)
         reward += float(obs.reward or 0.0)
         if obs.done:
@@ -85,9 +118,26 @@ def rollout_completion(
 
 
 def incident_reward_func(completions: list[str], **kwargs: Any) -> list[float]:
-    seeds = kwargs.get("seed") or list(range(len(completions)))
+    seeds = kwargs.get("seed")
+    scenario_ids = kwargs.get("scenario_id")
+    difficulties = kwargs.get("difficulty")
+
+    def value_at(values: Any, index: int, default: Any) -> Any:
+        if values is None:
+            return default
+        if isinstance(values, list):
+            if not values:
+                return default
+            return values[index % len(values)]
+        return values
+
     return [
-        rollout_completion(completion, seed=int(seeds[i % len(seeds)]))
+        rollout_completion(
+            completion,
+            seed=int(value_at(seeds, i, i)),
+            difficulty=str(value_at(difficulties, i, "mixed")),
+            scenario_id=value_at(scenario_ids, i, None),
+        )
         for i, completion in enumerate(completions)
     ]
 
@@ -205,23 +255,17 @@ def train(args: argparse.Namespace) -> None:
     )
     configure_special_tokens(model, tokenizer)
     model = ensure_peft_model(model, FastLanguageModel, args)
-    prompts = [
-        {
-            "prompt": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "An incident has started. Produce tool calls for one "
-                        "episode. Available roles: monitor, investigator, "
-                        "remediator, communicator."
-                    ),
-                },
-            ],
-            "seed": i,
-        }
-        for i in range(64)
-    ]
+    prompts = []
+    for i in range(args.num_prompts):
+        scenario = generate_scenario(seed=i, difficulty=args.difficulty)
+        prompts.append(
+            {
+                "prompt": render_prompt(scenario),
+                "seed": i,
+                "scenario_id": scenario.scenario_id,
+                "difficulty": scenario.difficulty,
+            }
+        )
     dataset = Dataset.from_list(prompts)
     config = GRPOConfig(
         output_dir=str(args.output_dir),
@@ -275,6 +319,8 @@ def main() -> None:
     parser.add_argument("--run-name", default="incident-commander-grpo")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--num-prompts", type=int, default=64)
+    parser.add_argument("--difficulty", default="mixed")
     args = parser.parse_args()
     if args.push_to_hub and not args.hub_model_id:
         raise SystemExit("--hub-model-id is required when --push-to-hub is set")
