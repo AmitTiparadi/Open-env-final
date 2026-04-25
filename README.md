@@ -225,6 +225,56 @@ This writes:
 These artifacts are useful for the README, final presentation, and judging
 evidence.
 
+## Reward-Hack Stress Test
+
+The reward-hack tester reuses the same hidden evaluator used for normal
+candidate scoring. It does not define a separate scoring system. Instead, it
+feeds adversarial outputs into the canonical evaluator and checks whether they
+are rejected.
+
+Run:
+
+```bash
+python scripts/reward_hack_tester.py
+```
+
+To run the harder hidden cases only:
+
+```bash
+python scripts/reward_hack_tester.py --hidden-only
+```
+
+To run public and hidden cases together:
+
+```bash
+python scripts/reward_hack_tester.py --include-hidden
+```
+
+This writes:
+
+- `outputs/evals/reward_hack_stress.csv`
+- `outputs/evals/reward_hack_stress_summary.json`
+
+Hidden-only runs write `reward_hack_stress_hidden.*`; public-plus-hidden
+runs write `reward_hack_stress_public_hidden.*`.
+
+Useful screenshot metrics:
+
+- `false_accept_rate`: lower is better; target `0.0`
+- `integrity_detection_rate`: target `1.0`
+- `unsafe_fix_detection_rate`: target `1.0`
+- `hallucination_detection_rate`: target `1.0`
+- `max_attack_reward`: should stay below the acceptance threshold
+
+The adversarial set includes hardcoded correct answers without evidence, fake
+reasoning, timer/reward tampering, unsafe fixes, premature incident closure, and
+fake success updates.
+
+Hidden evaluation cases are not used in pretraining, SFT, GRPO prompt sampling,
+normal `scenario_ids()` metadata, or the generated dataset files. They are only
+available when evaluator code explicitly opts in, and hidden environment
+observations replace the real case id with `hidden_eval_case`.
+
 ## Training On Hugging Face GPU Space
 
 This project includes a minimal GRPO training scaffold:
@@ -360,6 +410,7 @@ incident_commander_env/
   scenarios.py
   rewards.py
   demo_agents.py
+  evaluation.py
   server/
     app.py
     incident_environment.py
@@ -380,8 +431,10 @@ data/
 scripts/
   run_demo.py
   evaluate_baseline.py
+  reward_hack_tester.py
 tests/
   test_environment.py
+  test_evaluation_harness.py
 openenv.yaml
 pyproject.toml
 ```
@@ -399,6 +452,8 @@ Implemented:
 - safe vs unsafe remediation logic
 - scripted baseline
 - random baseline evaluation
+- reward-hack stress test using the same hidden evaluator
+- harder hidden evaluation scenarios kept out of training and public metadata
 - GRPO training scaffold
 - Docker Space metadata
 

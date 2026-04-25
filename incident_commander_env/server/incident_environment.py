@@ -33,6 +33,7 @@ from incident_commander_env.scenarios import (
     get_scenario,
     render_logs,
     render_metrics,
+    is_hidden_scenario,
     scenario_ids,
 )
 
@@ -82,16 +83,18 @@ class IncidentCommanderEnvironment(
         scenario_id: Optional[str] = None,
         preferred_root_cause: Optional[str] = None,
         max_turns: int = 14,
+        include_hidden_scenarios: bool = False,
         **_: Any,
     ) -> IncidentObservation:
         self.max_turns = max_turns
         self.scenario = (
-            get_scenario(scenario_id)
+            get_scenario(scenario_id, include_hidden=include_hidden_scenarios)
             if scenario_id
             else generate_scenario(
                 seed=seed,
                 difficulty=difficulty,
                 preferred_root_cause=preferred_root_cause,
+                include_hidden=include_hidden_scenarios,
             )
         )
         self.shared_notes = []
@@ -497,7 +500,7 @@ class IncidentCommanderEnvironment(
             available_tools=self.tool_specs(),
             turn_budget_remaining=max(0, self.max_turns - self._state.step_count),
             metadata={
-                "scenario_id": self.scenario.scenario_id,
+                "scenario_id": self._public_scenario_id(),
                 "difficulty": self.scenario.difficulty,
                 "affected_service": self.scenario.affected_service,
                 "scenario_ids": scenario_ids(),
@@ -540,6 +543,11 @@ class IncidentCommanderEnvironment(
             integrity_penalty=round(integrity, 4),
             total=round(total, 4),
         )
+
+    def _public_scenario_id(self) -> str:
+        if is_hidden_scenario(self.scenario.scenario_id):
+            return "hidden_eval_case"
+        return self.scenario.scenario_id
 
     def _metric_hint(self, metrics: dict[str, list[float]]) -> str:
         if not metrics:

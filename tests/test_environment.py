@@ -6,6 +6,7 @@ import unittest
 import json
 
 from incident_commander_env.models import AgentRole, IncidentAction
+from incident_commander_env.scenarios import HIDDEN_SCENARIOS, hidden_scenario_ids
 from incident_commander_env.server.incident_environment import IncidentCommanderEnvironment
 
 
@@ -169,6 +170,18 @@ class IncidentCommanderEnvironmentTest(unittest.TestCase):
         self.assertEqual(models["remediator"], "Qwen/Qwen3.5-9B")
         self.assertEqual(models["communicator"], "Qwen/Qwen3.5-9B")
         self.assertEqual(models["judge"], "google/gemma-4-31B-it")
+
+    def test_hidden_eval_metadata_does_not_expose_case_ids(self) -> None:
+        env = IncidentCommanderEnvironment()
+        hidden = HIDDEN_SCENARIOS[0]
+        obs = env.reset(
+            scenario_id=hidden.scenario_id,
+            include_hidden_scenarios=True,
+        )
+        self.assertEqual(obs.metadata["scenario_id"], "hidden_eval_case")
+        for hidden_id in hidden_scenario_ids():
+            self.assertNotIn(hidden_id, obs.metadata["scenario_ids"])
+        self.assertEqual(env.scenario.scenario_id, hidden.scenario_id)
 
 
 if __name__ == "__main__":

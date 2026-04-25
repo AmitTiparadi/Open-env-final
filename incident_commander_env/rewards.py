@@ -38,6 +38,38 @@ ROOT_CAUSE_ALIASES: dict[str, tuple[str, ...]] = {
         "tls handshake",
         "cert expiry",
     ),
+    "ranking_model_feature_rollout_poisoned_cache": (
+        "ranker_v73",
+        "embedding_schema=v12",
+        "cache poison",
+        "poisoned cache",
+        "nan embedding",
+        "zero_result_rate",
+    ),
+    "billing_idempotency_key_salt_mismatch": (
+        "idempotency_salt=billing-v2",
+        "previous_salt=billing-v1",
+        "idempotency key",
+        "idempotency_miss_rate",
+        "duplicate charge",
+        "duplicate_charge_guard",
+    ),
+    "notification_poison_pill_retry_loop": (
+        "poison pill",
+        "poison_pill",
+        "message_id=n-88421",
+        "deserialize_failed",
+        "retry_loop",
+        "retry_count=127",
+    ),
+    "edge_rate_limiter_key_cardinality_explosion": (
+        "ratelimit_key=user_id+tenant_id+request_id",
+        "rate limiter key",
+        "key cardinality",
+        "key_cardinality",
+        "cardinality explosion",
+        "limiter_backend_timeout",
+    ),
 }
 
 FALSE_ROOT_CAUSE_TERMS = (

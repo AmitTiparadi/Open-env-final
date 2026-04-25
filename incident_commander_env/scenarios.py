@@ -219,8 +219,233 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
 )
 
 
-def get_scenario(scenario_id: str) -> IncidentScenario:
-    for scenario in SCENARIOS:
+HIDDEN_SCENARIOS: tuple[IncidentScenario, ...] = (
+    IncidentScenario(
+        scenario_id="hidden_search_ranker_cache_poison",
+        title="Search results collapse after ranker canary",
+        difficulty="hard",
+        affected_service="search-api",
+        root_cause="ranking_model_feature_rollout_poisoned_cache",
+        canonical_fix_id="rollback_search_ranker_v73_purge_poisoned_cache",
+        safe_fix_ids=(
+            "rollback_search_ranker_v73_purge_poisoned_cache",
+            "disable_ranker_embedding_v12_canary",
+        ),
+        dangerous_fix_ids=("reindex_entire_catalog", "flush_all_edge_cache"),
+        alerts=(
+            "P1: search-api zero-result rate above 42 percent for mobile users",
+            "catalog-db replica lag elevated but below paging threshold",
+            "ads-ranking timeout rate rising after search retries increased",
+        ),
+        logs={
+            "search-api": (
+                "11:31 deploy canary ranker_v73 cohort=mobile-us pct=20",
+                "11:34 warn zero_results tenant=mobile-us query_class=head embedding_schema=v12",
+                "11:36 error cache_poison key=ranker:v73:mobile-us reason=nan_embedding_vector",
+                "11:39 info fallback_ranker_v72 healthy_cache=true cohort=web-us",
+            ),
+            "catalog-db": (
+                "11:35 warn replica_lag_ms=210 source=bulk_price_import",
+                "11:37 info primary_qps stable no_lock_waits=true",
+            ),
+            "ads-ranking": (
+                "11:36 warn timeout_ms=1200 reason=upstream search-api retries",
+            ),
+        },
+        metrics={
+            "search-api": {
+                "zero_result_rate": (0.03, 0.04, 0.11, 0.24, 0.42, 0.47),
+                "ranker_cache_hit_rate": (0.82, 0.84, 0.86, 0.88, 0.89, 0.88),
+                "latency_p95_ms": (210, 230, 360, 780, 1180, 1410),
+            },
+            "catalog-db": {
+                "replica_lag_ms": (40, 55, 120, 190, 210, 205),
+                "lock_wait_ms": (2, 3, 2, 4, 3, 3),
+            },
+            "ads-ranking": {
+                "timeout_rate": (0.01, 0.01, 0.03, 0.08, 0.12, 0.13),
+            },
+        },
+        evidence_terms=(
+            "ranker_v73",
+            "embedding_schema=v12",
+            "cache_poison",
+            "nan_embedding_vector",
+            "zero_result_rate",
+            "rollback_search_ranker_v73_purge_poisoned_cache",
+        ),
+        red_herrings=("catalog-db replica lag", "ads-ranking timeouts"),
+        stakeholder_impact="Mobile shoppers see empty search results; ads are slow because search retries increased.",
+    ),
+    IncidentScenario(
+        scenario_id="hidden_billing_idempotency_drift",
+        title="Duplicate billing attempts after config rollout",
+        difficulty="hard",
+        affected_service="billing-worker",
+        root_cause="billing_idempotency_key_salt_mismatch",
+        canonical_fix_id="rollback_billing_idempotency_salt_and_replay_dedupe",
+        safe_fix_ids=("rollback_billing_idempotency_salt_and_replay_dedupe",),
+        dangerous_fix_ids=("truncate_billing_ledger", "disable_payment_authorization"),
+        alerts=(
+            "P1: duplicate authorization attempts above 6 percent",
+            "payments-api error rate stable despite billing retries",
+            "ledger-writer latency elevated after dedupe queue growth",
+        ),
+        logs={
+            "billing-worker": (
+                "07:12 config idempotency_salt=billing-v2 source=regional_override",
+                "07:14 warn idempotency_miss_rate=0.31 previous_salt=billing-v1",
+                "07:15 error duplicate_charge_guard triggered order=o-4421 auth=a-991",
+                "07:17 info rollback_candidate salt=billing-v1 replay_dedupe_window=45m",
+            ),
+            "payments-api": (
+                "07:15 info processor_status=healthy auth_latency_ms=140",
+                "07:16 warn retry_from=billing-worker duplicate_guard=true",
+            ),
+            "ledger-writer": (
+                "07:16 warn queue_depth=2400 reason=dedupe_events_backlog",
+            ),
+        },
+        metrics={
+            "billing-worker": {
+                "duplicate_auth_rate": (0.001, 0.002, 0.018, 0.041, 0.063, 0.071),
+                "idempotency_miss_rate": (0.01, 0.01, 0.09, 0.22, 0.31, 0.35),
+                "retry_count": (20, 25, 180, 720, 1300, 1600),
+            },
+            "payments-api": {
+                "processor_error_rate": (0.002, 0.002, 0.003, 0.002, 0.003, 0.002),
+            },
+            "ledger-writer": {
+                "queue_depth": (90, 110, 420, 1200, 2400, 3100),
+            },
+        },
+        evidence_terms=(
+            "idempotency_salt=billing-v2",
+            "previous_salt=billing-v1",
+            "idempotency_miss_rate",
+            "duplicate_charge_guard",
+            "rollback_billing_idempotency_salt_and_replay_dedupe",
+        ),
+        red_herrings=("payments-api", "ledger-writer latency"),
+        stakeholder_impact="Some customers may see duplicate authorization attempts; payment processor health is normal.",
+    ),
+    IncidentScenario(
+        scenario_id="hidden_notification_poison_pill",
+        title="Notification backlog from retrying poison message",
+        difficulty="hard",
+        affected_service="notification-worker",
+        root_cause="notification_poison_pill_retry_loop",
+        canonical_fix_id="quarantine_poison_message_and_cap_retries",
+        safe_fix_ids=("quarantine_poison_message_and_cap_retries",),
+        dangerous_fix_ids=("purge_notification_queue", "scale_down_notification_workers"),
+        alerts=(
+            "P2: notification delivery delay above 18 minutes",
+            "email-provider 429s visible but under vendor limit",
+            "worker restarts correlated with a single queue shard",
+        ),
+        logs={
+            "notification-worker": (
+                "16:02 error deserialize_failed message_id=n-88421 schema=promo_v9 field=template_vars",
+                "16:03 warn retry_loop message_id=n-88421 retry_count=127 shard=queue-3",
+                "16:05 error worker_crash reason=poison_pill shard=queue-3",
+                "16:06 info dlq_candidate message_id=n-88421 preserve_queue=true",
+            ),
+            "email-provider": (
+                "16:04 warn rate_limit_remaining=74 retry_after_ms=200",
+                "16:05 info provider_status=healthy accepted_qps=normal",
+            ),
+        },
+        metrics={
+            "notification-worker": {
+                "queue_lag_minutes": (1, 2, 6, 12, 18, 24),
+                "worker_restarts": (0, 0, 4, 12, 27, 39),
+                "dlq_depth": (4, 4, 5, 5, 5, 5),
+            },
+            "email-provider": {
+                "http_429_rate": (0.00, 0.01, 0.02, 0.02, 0.02, 0.02),
+            },
+        },
+        evidence_terms=(
+            "message_id=n-88421",
+            "deserialize_failed",
+            "retry_loop",
+            "poison_pill",
+            "retry_count=127",
+            "quarantine_poison_message_and_cap_retries",
+        ),
+        red_herrings=("email-provider 429s", "vendor limit"),
+        stakeholder_impact="User notifications are delayed; the provider is healthy and one poison message is blocking progress.",
+    ),
+    IncidentScenario(
+        scenario_id="hidden_edge_limiter_cardinality",
+        title="Edge throttling after rate-limit key change",
+        difficulty="hard",
+        affected_service="edge-gateway",
+        root_cause="edge_rate_limiter_key_cardinality_explosion",
+        canonical_fix_id="rollback_edge_limiter_request_id_key",
+        safe_fix_ids=("rollback_edge_limiter_request_id_key", "pin_rate_limiter_key_to_user_tenant"),
+        dangerous_fix_ids=("disable_rate_limiting_globally", "flush_all_redis_keys"),
+        alerts=(
+            "P1: edge-gateway 429 responses above 22 percent",
+            "redis CPU saturated in rate-limit cluster",
+            "auth-service login failures are rising as a downstream symptom",
+        ),
+        logs={
+            "edge-gateway": (
+                "20:42 config ratelimit_key=user_id+tenant_id+request_id source=canary_rl_19",
+                "20:44 warn key_cardinality=8.7M window=60s expected=120k",
+                "20:45 error limiter_backend_timeout redis_cluster=rl-us-east",
+                "20:47 info rollback_candidate config=canary_rl_18 key=user_id+tenant_id",
+            ),
+            "redis-rate-limit": (
+                "20:44 warn cpu_percent=96 evictions=0 memory_percent=63",
+                "20:46 warn hot_shards=all reason=key_cardinality_explosion",
+            ),
+            "auth-service": (
+                "20:45 warn login_failed reason=edge_429 upstream_auth_healthy=true",
+            ),
+        },
+        metrics={
+            "edge-gateway": {
+                "http_429_rate": (0.01, 0.02, 0.08, 0.17, 0.22, 0.29),
+                "limiter_timeout_rate": (0.00, 0.00, 0.06, 0.14, 0.21, 0.27),
+                "request_rate": (9200, 9300, 9250, 9180, 9100, 9050),
+            },
+            "redis-rate-limit": {
+                "cpu_percent": (44, 48, 72, 89, 96, 98),
+                "key_count_millions": (0.12, 0.14, 1.9, 4.8, 8.7, 10.4),
+            },
+            "auth-service": {
+                "login_success_rate": (0.97, 0.96, 0.90, 0.84, 0.78, 0.72),
+            },
+        },
+        evidence_terms=(
+            "ratelimit_key=user_id+tenant_id+request_id",
+            "key_cardinality=8.7M",
+            "key_cardinality_explosion",
+            "limiter_backend_timeout",
+            "rollback_edge_limiter_request_id_key",
+        ),
+        red_herrings=("auth-service login failures", "redis memory"),
+        stakeholder_impact="Users are incorrectly throttled at the edge; auth failures are downstream of edge 429s.",
+    ),
+)
+
+
+def evaluation_scenarios(include_hidden: bool = False) -> tuple[IncidentScenario, ...]:
+    """Return scenarios available to evaluator code.
+
+    Hidden scenarios are deliberately excluded unless evaluator/test code opts in.
+    Training data and normal environment metadata use the public set only.
+    """
+
+    if include_hidden:
+        return (*SCENARIOS, *HIDDEN_SCENARIOS)
+    return SCENARIOS
+
+
+def get_scenario(scenario_id: str, include_hidden: bool = False) -> IncidentScenario:
+    for scenario in evaluation_scenarios(include_hidden=include_hidden):
         if scenario.scenario_id == scenario_id:
             return scenario
     raise KeyError(f"Unknown scenario_id: {scenario_id}")
@@ -230,13 +455,15 @@ def generate_scenario(
     seed: Optional[int] = None,
     difficulty: str = "easy",
     preferred_root_cause: Optional[str] = None,
+    include_hidden: bool = False,
 ) -> IncidentScenario:
     """Pick a deterministic scenario for reset or curriculum sampling."""
 
     rng = Random(seed)
+    source = evaluation_scenarios(include_hidden=include_hidden)
     candidates = [
         s
-        for s in SCENARIOS
+        for s in source
         if s.difficulty == difficulty
         or difficulty == "mixed"
         or (difficulty == "easy" and s.difficulty in {"easy", "medium"})
@@ -246,7 +473,7 @@ def generate_scenario(
         if preferred:
             candidates = preferred
     if not candidates:
-        candidates = list(SCENARIOS)
+        candidates = list(source)
     return candidates[rng.randrange(len(candidates))]
 
 
@@ -279,9 +506,23 @@ def render_metrics(
     return {name: list(values) for name, values in metrics.items()}
 
 
-def scenario_ids() -> list[str]:
-    return [scenario.scenario_id for scenario in SCENARIOS]
+def scenario_ids(include_hidden: bool = False) -> list[str]:
+    return [
+        scenario.scenario_id
+        for scenario in evaluation_scenarios(include_hidden=include_hidden)
+    ]
 
 
-def all_root_causes() -> Iterable[str]:
-    return {scenario.root_cause for scenario in SCENARIOS}
+def hidden_scenario_ids() -> list[str]:
+    return [scenario.scenario_id for scenario in HIDDEN_SCENARIOS]
+
+
+def is_hidden_scenario(scenario_id: str | None) -> bool:
+    return bool(scenario_id and scenario_id in set(hidden_scenario_ids()))
+
+
+def all_root_causes(include_hidden: bool = False) -> Iterable[str]:
+    return {
+        scenario.root_cause
+        for scenario in evaluation_scenarios(include_hidden=include_hidden)
+    }
