@@ -134,11 +134,12 @@ Affected service: {scenario.affected_service}
 Visible alerts:
 {alerts}
 
-Produce a complete compact JSON list with 6 to 9 calls:
-check_metrics, query_logs, optional query_api/web_search/python_exec,
-share_note, submit_root_cause, deploy_fix, send_update, finish_incident.
+Produce the shortest complete JSON continuation with exactly these 7 calls:
+check_metrics, query_logs, share_note, submit_root_cause, deploy_fix,
+send_update, finish_incident.
 
 Do not invent tools. Do not use shared/shared-notebook as a role.
+Do not use query_api unless needed; do not use python_exec in this task.
 Do not write "Thinking Process", "The user wants", "Let me", analysis text, or
 `</think>`. The first character must be `[` and the last character must be `]`.
 End the answer immediately after the closing JSON bracket.
@@ -237,6 +238,19 @@ def json_values_from_text(text: str) -> list[Any]:
     return values
 
 
+def generated_json_text(completion: Any) -> str:
+    """Normalize GRPO completions that continue after the prompt-prefilled '['."""
+
+    text = completion_to_text(completion).strip()
+    if not text:
+        return text
+    if text.startswith("["):
+        return text
+    if text.startswith("{"):
+        return f"[{text}"
+    return text
+
+
 def candidate_action_items(payload: Any) -> list[Any]:
     if isinstance(payload, list):
         return payload
@@ -328,7 +342,7 @@ def normalize_action_item(item: Any) -> dict[str, Any] | None:
 
 
 def parse_actions(completion: Any) -> list[IncidentAction]:
-    completion_text = completion_to_text(completion)
+    completion_text = generated_json_text(completion)
     actions = []
     for payload in json_values_from_text(completion_text):
         for item in candidate_action_items(payload):
@@ -345,7 +359,7 @@ def parse_actions(completion: Any) -> list[IncidentAction]:
 
 
 def format_fallback_reward(completion: Any) -> float:
-    text = completion_to_text(completion)
+    text = generated_json_text(completion)
     text_lower = text.lower()
     reward = -0.05
     if json_values_from_text(text):
@@ -362,11 +376,11 @@ def format_fallback_reward(completion: Any) -> float:
 def completion_quality_reward(completion: Any, actions: list[IncidentAction]) -> float:
     """Small shaping reward for concise, naturally terminated tool-call JSON."""
 
-    text = completion_to_text(completion).strip()
+    text = generated_json_text(completion)
     text_lower = text.lower()
     reward = 0.0
     if text.startswith("[") and text.endswith("]"):
-        reward += 0.08
+        reward += 0.12
     elif text.startswith("{") and (text.endswith("]") or text.endswith("}")):
         reward += 0.06
     elif text.startswith(("{", "[")) and text.endswith(("}", "]")):
@@ -388,9 +402,11 @@ def completion_quality_reward(completion: Any, actions: list[IncidentAction]) ->
         reward -= 1.0
     if actions:
         if actions[-1].tool_name == "finish_incident":
-            reward += 0.04
+            reward += 0.08
         elif any(action.tool_name == "finish_incident" for action in actions):
             reward -= 0.04
+    if 6 <= len(actions) <= 8:
+        reward += 0.05
     if len(actions) > 9:
         reward -= min(0.18, 0.03 * (len(actions) - 9))
     if len(text) > 3000:

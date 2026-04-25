@@ -6,7 +6,7 @@ import json
 import unittest
 
 from incident_commander_env.scenarios import get_scenario
-from training.train_grpo import render_prompt
+from training.train_grpo import generated_json_text, parse_actions, render_prompt
 from training.generate_targeted_data import (
     make_targeted_pretrain_rows,
     make_targeted_sft_rows,
@@ -44,6 +44,17 @@ class TargetedDataTests(unittest.TestCase):
         self.assertIn("/no_think", prompt)
         self.assertIn("<|im_start|>assistant\n[", prompt)
         self.assertTrue(prompt.endswith("["))
+
+    def test_grpo_parser_accepts_prefilled_json_suffix(self) -> None:
+        suffix = (
+            '{"tool_name":"check_metrics","agent_role":"monitor",'
+            '"arguments":{"service":"checkout-api"}},'
+            '{"tool_name":"finish_incident","agent_role":"communicator",'
+            '"arguments":{"summary":"done"}}]'
+        )
+        self.assertTrue(generated_json_text(suffix).startswith("["))
+        actions = parse_actions(suffix)
+        self.assertEqual([action.tool_name for action in actions], ["check_metrics", "finish_incident"])
 
 
 if __name__ == "__main__":
