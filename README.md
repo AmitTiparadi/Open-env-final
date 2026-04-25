@@ -228,6 +228,27 @@ This creates:
 - `data/sft_trajectories.jsonl`
 - `data/eval_scenarios.jsonl`
 
+Run the 80/10/10 training stages:
+
+```bash
+# 80% domain-adaptive continued pretraining
+python training/train_pretrain.py --dry-run
+python training/train_pretrain.py \
+  --push-to-hub \
+  --hub-model-id YOUR_USERNAME/incident-commander-pretrain
+
+# 10% supervised fine-tuning on ideal tool-call traces
+python training/train_sft.py --dry-run
+python training/train_sft.py \
+  --model-name YOUR_USERNAME/incident-commander-pretrain \
+  --push-to-hub \
+  --hub-model-id YOUR_USERNAME/incident-commander-sft
+
+# 10% RL post-training with environment rewards
+python training/train_grpo.py --dry-run
+python training/train_grpo.py
+```
+
 Before running training on a GPU Space, install the training dependencies:
 
 ```bash
@@ -313,6 +334,8 @@ server/
   Dockerfile
 training/
   prepare_data.py
+  train_pretrain.py
+  train_sft.py
   train_grpo.py
 data/
   pretrain_corpus.jsonl
