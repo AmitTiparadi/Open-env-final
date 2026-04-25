@@ -87,8 +87,8 @@ def dry_run(args: argparse.Namespace) -> None:
 def load_training_stack() -> tuple[Any, Any, Any, Any]:
     try:
         from datasets import load_dataset
-        from trl import SFTConfig, SFTTrainer
         from unsloth import FastLanguageModel
+        from trl import SFTConfig, SFTTrainer
     except Exception as exc:
         raise SystemExit(
             "Install training dependencies before running SFT: "
@@ -96,6 +96,43 @@ def load_training_stack() -> tuple[Any, Any, Any, Any]:
             f"Import error: {exc}"
         )
     return load_dataset, SFTConfig, SFTTrainer, FastLanguageModel
+
+
+def configure_special_tokens(model: Any, tokenizer: Any) -> str:
+    def token_id(token: str | None) -> int | None:
+        if not token:
+            return None
+        value = tokenizer.convert_tokens_to_ids(token)
+        if value is None:
+            return None
+        if getattr(tokenizer, "unk_token_id", None) is not None and value == tokenizer.unk_token_id:
+            return None
+        return int(value)
+
+    eos_token = None
+    eos_token_id = None
+    for candidate in ("<|im_end|>", tokenizer.eos_token, "<|endoftext|>"):
+        candidate_id = token_id(candidate)
+        if candidate_id is not None:
+            eos_token = candidate
+            eos_token_id = candidate_id
+            break
+    if eos_token is None or eos_token_id is None:
+        raise ValueError("Could not find a valid EOS token in the tokenizer vocabulary.")
+
+    tokenizer.eos_token = eos_token
+    tokenizer.eos_token_id = eos_token_id
+    if tokenizer.pad_token is None or token_id(tokenizer.pad_token) is None:
+        tokenizer.pad_token = eos_token
+        tokenizer.pad_token_id = eos_token_id
+
+    if getattr(model, "config", None) is not None:
+        model.config.eos_token_id = eos_token_id
+        model.config.pad_token_id = tokenizer.pad_token_id
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.eos_token_id = eos_token_id
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+    return eos_token
 
 
 def maybe_apply_chat_template(dataset: Any, tokenizer: Any) -> Any:
@@ -126,10 +163,7 @@ def train(args: argparse.Namespace) -> None:
         max_seq_length=args.max_seq_length,
         load_in_4bit=True,
     )
-    if tokenizer.eos_token not in tokenizer.get_vocab():
-        tokenizer.eos_token = tokenizer.sep_token or tokenizer.eos_token or "<|endoftext|>"
-    if tokenizer.pad_token is None or tokenizer.pad_token not in tokenizer.get_vocab():
-        tokenizer.pad_token = tokenizer.eos_token
+    eos_token = configure_special_tokens(model, tokenizer)
     model = FastLanguageModel.get_peft_model(
         model,
         r=args.lora_r,
@@ -154,7 +188,7 @@ def train(args: argparse.Namespace) -> None:
     training_args = SFTConfig(
         output_dir=str(args.output_dir),
         dataset_text_field="text",
-        eos_token=tokenizer.eos_token,
+        eos_token=eos_token,
         max_length=args.max_seq_length,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
