@@ -411,6 +411,19 @@ def incident_reward_func(completions: list[str], **kwargs: Any) -> list[float]:
     return rewards
 
 
+def text_tokenizer_from_processing_class(processing_class: Any) -> Any:
+    if hasattr(processing_class, "convert_tokens_to_ids"):
+        return processing_class
+    for attr_name in ("tokenizer", "text_tokenizer"):
+        tokenizer = getattr(processing_class, attr_name, None)
+        if tokenizer is not None and hasattr(tokenizer, "convert_tokens_to_ids"):
+            return tokenizer
+    raise TypeError(
+        "Expected a text tokenizer or processor with a tokenizer attribute, "
+        f"got {type(processing_class).__name__}."
+    )
+
+
 def configure_special_tokens(model: Any, tokenizer: Any) -> str:
     def token_id(token: str | None) -> int | None:
         if not token:
@@ -607,11 +620,12 @@ def train(args: argparse.Namespace) -> None:
             f"runtime before running full GRPO. Import error: {exc}"
         )
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, processing_class = FastLanguageModel.from_pretrained(
         model_name=args.model_name,
         max_seq_length=args.max_seq_length,
         load_in_4bit=True,
     )
+    tokenizer = text_tokenizer_from_processing_class(processing_class)
     configure_special_tokens(model, tokenizer)
     model = ensure_peft_model(model, FastLanguageModel, args)
     if args.debug_reward_samples:
