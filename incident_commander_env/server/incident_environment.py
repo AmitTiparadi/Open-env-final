@@ -10,6 +10,13 @@ from incident_commander_env.agent_config import (
     DEFAULT_JUDGE_ENSEMBLE_SIZE,
 )
 from incident_commander_env.compat import OpenEnvEnvironment
+from incident_commander_env.dynamic_prompting import prompt_update_metadata
+from incident_commander_env.execution_logging import (
+    ExecutionLog,
+    FailurePatternTracker,
+    execution_log_from_exception,
+    execution_log_from_observation,
+)
 from incident_commander_env.external_tools import (
     execute_python,
     query_incident_api,
@@ -24,6 +31,7 @@ from incident_commander_env.models import (
     RubricBreakdown,
     ToolSpec,
 )
+from incident_commander_env.observability import SentryMonitor
 from incident_commander_env.rewards import (
     EVALUATION_INTEGRITY_PENALTY,
     best_evidence_overlap,
@@ -78,6 +86,9 @@ class IncidentCommanderEnvironment(
         self.judge = EnsembleJudge()
         self.judge_evaluations: list[dict[str, Any]] = []
         self.tool_history: list[dict[str, Any]] = []
+        self.execution_logs: list[ExecutionLog] = []
+        self.failure_tracker = FailurePatternTracker()
+        self.sentry = SentryMonitor()
         self.max_turns = 14
 
     @property
@@ -112,6 +123,8 @@ class IncidentCommanderEnvironment(
         self.status_update_reasons = []
         self.judge_evaluations = []
         self.tool_history = []
+        self.execution_logs = []
+        self.failure_tracker = FailurePatternTracker()
         self._state = IncidentState(
             episode_id=episode_id or str(uuid4()),
             step_count=0,
@@ -191,13 +204,52 @@ class IncidentCommanderEnvironment(
                 tool_result={"error": "role_not_allowed"},
             )
         else:
-            observation = handler(action)
+            try:
+                observation = handler(action)
+            except Exception as exc:
+                log = execution_log_from_exception(
+                    step=self._state.step_count,
+                    action=action,
+                    exc=exc,
+                    context=self._execution_context(),
+                )
+                self.sentry.capture_exception(exc, context=log.context)
+                observation = self._observation(
+                    message="Tool execution raised a runtime exception.",
+                    reward=log.reward,
+                    role=action.agent_role,
+                    tool_result={
+                        "error": "runtime_exception",
+                        "error_type": log.error.type,
+                    },
+                )
+                observation = self._attach_execution_metadata(observation, log)
+                self.tool_history.append(
+                    {
+                        "step": self._state.step_count,
+                        "role": action.agent_role.value,
+                        "tool": action.tool_name,
+                        "reward": observation.reward,
+                        "done": observation.done,
+                        "success": False,
+                        "error_type": log.error.type,
+                    }
+                )
+                return observation
 
         if self._state.step_count >= self.max_turns and not observation.done:
             observation.done = True
             observation.message = f"{observation.message} Turn budget exhausted."
             if not self._state.resolved:
                 observation.reward = float(observation.reward or 0.0) - 0.1
+
+        log = execution_log_from_observation(
+            step=self._state.step_count,
+            action=action,
+            observation=observation,
+            context=self._execution_context(),
+        )
+        observation = self._attach_execution_metadata(observation, log)
 
         self.tool_history.append(
             {
@@ -206,6 +258,8 @@ class IncidentCommanderEnvironment(
                 "tool": action.tool_name,
                 "reward": observation.reward,
                 "done": observation.done,
+                "success": log.success,
+                "error_type": log.error.type,
             }
         )
         return observation
@@ -675,6 +729,33 @@ class IncidentCommanderEnvironment(
                 str(self._state.deployed_fix_id or ""),
             ]
         )
+
+    def _execution_context(self) -> dict[str, Any]:
+        return {
+            "episode_id": self._state.episode_id,
+            "scenario_id": self._public_scenario_id(),
+            "difficulty": self.scenario.difficulty,
+            "step": self._state.step_count,
+        }
+
+    def _attach_execution_metadata(
+        self,
+        observation: IncidentObservation,
+        log: ExecutionLog,
+    ) -> IncidentObservation:
+        self.execution_logs.append(log)
+        recurring = self.failure_tracker.record(log)
+        if not log.success:
+            self.sentry.capture_execution_log(
+                log,
+                task_context=log.context,
+                recurring_pattern=recurring,
+            )
+        observation.metadata["latest_execution_log"] = log.model_dump(mode="json")
+        observation.metadata["prompt_update"] = prompt_update_metadata(self.execution_logs[-8:])
+        observation.metadata["failure_patterns"] = self.failure_tracker.snapshot()
+        observation.metadata["execution_log_count"] = len(self.execution_logs)
+        return observation
 
     def _metric_hint(self, metrics: dict[str, list[float]]) -> str:
         if not metrics:

@@ -15,6 +15,7 @@ dependencies = [
     "requests>=2.31.0",
     "matplotlib>=3.8.0",
     "openenv-core[core]>=0.2.3",
+    "sentry-sdk>=2.0.0",
 ]
 
 [project.optional-dependencies]

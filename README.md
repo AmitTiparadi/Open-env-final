@@ -157,6 +157,11 @@ It supports:
 - structured API calls such as `service_graph`, `deployments`, `metrics_summary`, and `runbook`
 - adaptive curriculum sampling that increases probability for weak root-cause and difficulty buckets
 - hidden evaluation cases that are opt-in for eval but excluded from normal training data
+- structured execution logs after each action, including `stdout`, `stderr`,
+  `exit_code`, `success`, and normalized error types such as `syntax_error`,
+  `import_error`, `runtime_error`, and `logic_error`
+- sanitized prompt-update metadata that summarizes recent failure patterns for
+  retries without exposing hidden test ids or raw Sentry details
 - `OnlineRLTrainer`, which collects rollout batches, calls a policy-update hook, and updates the curriculum state
 
 Run a local smoke test:
@@ -171,6 +176,19 @@ The rollout shape is:
 task generator -> prompt -> agent action -> environment observation -> reward
               -> next action -> next observation -> final judged score
 ```
+
+## Observability
+
+Set `SENTRY_DSN` to enable Sentry monitoring:
+
+```bash
+set SENTRY_DSN=your_sentry_dsn
+```
+
+Sentry captures runtime exceptions and recurring execution failure patterns with
+task context, tool name, role, reward, and normalized error type. Sentry is not
+exposed to the agent loop. Agent-facing observations only receive sanitized
+`prompt_update` guidance such as repeated import or logic failures.
 
 ## Running The Space
 

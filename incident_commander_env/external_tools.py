@@ -123,7 +123,15 @@ def execute_python(code: str) -> dict[str, Any]:
 
     violations = validate_python_code(code)
     if violations:
-        return {"ok": False, "error": "sandbox_violation", "violations": violations}
+        return {
+            "ok": False,
+            "success": False,
+            "error": "sandbox_violation",
+            "violations": violations,
+            "stdout": "",
+            "stderr": "; ".join(violations),
+            "exit_code": 1,
+        }
 
     env = {
         "__builtins__": _safe_builtins(),
@@ -143,13 +151,19 @@ def execute_python(code: str) -> dict[str, Any]:
     except Exception as exc:
         return {
             "ok": False,
+            "success": False,
             "error": type(exc).__name__,
             "message": str(exc)[:300],
             "stdout": stdout.getvalue()[:1000],
+            "stderr": str(exc)[:1000],
+            "exit_code": 1,
         }
     return {
         "ok": True,
+        "success": True,
         "stdout": stdout.getvalue()[:1000],
+        "stderr": "",
+        "exit_code": 0,
         "result": _jsonable_result(result),
     }
 
